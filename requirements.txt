@@ -4,3 +4,5 @@ yfinance
 pandas
 FinMind
 numpy
+tqdm
+aiohttp
