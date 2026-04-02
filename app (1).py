@@ -125,13 +125,17 @@ def analyze_stock(df, m_list):
 # ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="台股極短線 AI 監控", layout="centered")
 
-st.markdown("""
-<style>
-    html, body, [data-testid="stAppViewContainer"] { background-color: #0a0d14 !important; color: white; }
-    .card { background:#111827; padding:20px; border-radius:12px; border-left:6px solid #38bdf8; margin-bottom:15px; border: 1px solid rgba(255,255,255,0.05); }
-    .tag { background: rgba(56, 189, 248, 0.12); color: #38bdf8; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; margin-right: 5px; border: 1px solid rgba(56, 189, 248, 0.3); }
-</style>
-""", unsafe_allow_html=True)
+# ✅ 修正：將 CSS 獨立成變數，避免 Python 3.14 tokenizer 誤解 rgba 小數語法
+_CSS = (
+    "<style>"
+    "html, body, [data-testid='stAppViewContainer'] { background-color: #0a0d14 !important; color: white; }"
+    ".card { background:#111827; padding:20px; border-radius:12px; border-left:6px solid #38bdf8;"
+    " margin-bottom:15px; border: 1px solid #1e2533; }"
+    ".tag { background: #0e2233; color: #38bdf8; padding: 2px 8px; border-radius: 4px;"
+    " font-size: 0.75rem; margin-right: 5px; border: 1px solid #1e4d6b; }"
+    "</style>"
+)
+st.markdown(_CSS, unsafe_allow_html=True)
 
 if "auth" not in st.session_state:
     st.session_state.auth = False
