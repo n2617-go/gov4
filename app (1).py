@@ -9,10 +9,11 @@ import pandas as pd
 from FinMind.data import DataLoader
 
 # ══════════════════════════════════════════════════════════
-# 1. 系統初始化與【網址同步】邏輯 (解決資料消失問題)
+# 1. 系統初始化與【中文名單】邏輯
 # ══════════════════════════════════════════════════════════
-st.set_page_config(page_title="台股監控-永久保存版", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="台股監控-中文強化版", layout="centered", initial_sidebar_state="collapsed")
 
+# 預設五檔股票 (確保初始即為中文)
 DEFAULT_LIST = [
     {"id": "2330", "name": "台積電"},
     {"id": "2317", "name": "鴻海"},
@@ -21,10 +22,8 @@ DEFAULT_LIST = [
     {"id": "1326", "name": "台化"}
 ]
 
-# 核心修正：從網址讀取名單，若無網址則使用預設
 if "watchlist" not in st.session_state:
     try:
-        # 嘗試從 URL 參數讀取 wl 欄位
         url_params = st.query_params.get("wl", "")
         if url_params:
             st.session_state.watchlist = json.loads(url_params)
@@ -52,14 +51,29 @@ html, body, [data-testid="stAppViewContainer"] { background: #0a0d14 !important;
 @keyframes blink { 0% {opacity:1} 50% {opacity:0.3} 100% {opacity:1} }
 .tech-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem; background: rgba(255,255,255,0.03); border-radius: 10px; padding: 0.6rem; margin-top: 10px; }
 .tech-item { text-align: center; font-size: 0.7rem; color: #94a3b8; }
-.remove-btn { position: absolute; top: 10px; right: 10px; color: #475569; background: none; border: none; font-size: 0.8rem; cursor: pointer; }
-.remove-btn:hover { color: #ef4444; }
+.tech-item b { color: #cbd5e1; font-family: 'JetBrains Mono'; font-size: 0.8rem; }
 </style>
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
-# 3. 資料抓取邏輯 (維持優化版)
+# 3. 資料處理 (包含中文名稱修復)
 # ══════════════════════════════════════════════════════════
+
+def get_stock_name_zh(code):
+    """專門負責抓取中文名稱"""
+    try:
+        # 方法一：利用 Yahoo Finance 抓取 longName (通常包含中文)
+        tk = yf.Ticker(f"{code}.TW")
+        info = tk.info
+        name = info.get('longName') or info.get('shortName') or f"股票 {code}"
+        
+        # 移除常見的英文後綴，保留中文
+        for suffix in ["Taiwan", "Co., Ltd.", "Inc.", "Ordinary Shares"]:
+            name = name.replace(suffix, "").strip()
+        return name
+    except:
+        return f"股票 {code}"
+
 @st.cache_data(ttl=300)
 def get_fm_data(stock_ids, token):
     if not token: return None
@@ -77,17 +91,15 @@ def get_twse_live(ids):
     except: return []
 
 @st.cache_data(ttl=3600)
-def get_tech_and_name(code):
+def get_tech_data(code):
+    """純計算指標，不處理名稱"""
     try:
         tk = yf.Ticker(f"{code}.TW")
         h = tk.history(period="1mo")
-        name = tk.info.get('shortName', f"股票 {code}")
-        if h.empty: return name, 0.0, 0.0, 50, 50, 0, "無資料"
-        
+        if h.empty: return 0.0, 0.0, 50, 50, 0, "無資料"
         last_p = h['Close'].iloc[-1]
-        yest_p = h['Close'].iloc[-2] if len(h)>1 else last_p
-        y_chg = ((last_p - yest_p)/yest_p*100)
-        
+        prev_p = h['Close'].iloc[-2] if len(h)>1 else last_p
+        y_chg = ((last_p - prev_p)/prev_p*100)
         l9, h9 = h['Low'].rolling(9).min(), h['High'].rolling(9).max()
         rsv = 100 * (h['Close'] - l9) / (h9 - l9)
         k, d = 50.0, 50.0
@@ -96,12 +108,12 @@ def get_tech_and_name(code):
             d = (2/3)*d + (1/3)*k
         ma20 = h['Close'].rolling(20).mean().iloc[-1]
         sig = "🔥金叉" if k > d and k < 30 else "⚠️死叉" if k < d and k > 70 else "⚖️整理"
-        return name, last_p, y_chg, k, d, ma20, sig
+        return last_p, y_chg, k, d, ma20, sig
     except:
-        return f"股票 {code}", 0.0, 0.0, 50, 50, 0, "讀取中"
+        return 0.0, 0.0, 50, 50, 0, "讀取中"
 
 # ══════════════════════════════════════════════════════════
-# 4. UI 與 新增/刪除邏輯
+# 4. UI 與 邏輯
 # ══════════════════════════════════════════════════════════
 
 with st.sidebar:
@@ -112,34 +124,34 @@ with st.sidebar:
         st.rerun()
     st.divider()
     warn_p = st.slider("預警門檻 (%)", 0.5, 5.0, 2.0)
-    if st.button("重置並清除網址"):
+    if st.button("重置名單"):
         st.query_params.clear()
         st.session_state.watchlist = DEFAULT_LIST
         st.rerun()
 
 st.title("📊 台股大師監控")
 
-# 新增股票並同步到網址
+# --- 新增股票邏輯 (包含中文自動抓取) ---
 with st.expander("➕ 新增關注股票"):
     col1, col2 = st.columns([3,1])
-    with col1: nid = st.text_input("代碼 (例: 2317)").strip()
+    with col1: nid = st.text_input("輸入代碼 (例: 2454)").strip()
     with col2:
         if st.button("加入"):
             if nid and not any(x['id'] == nid for x in st.session_state.watchlist):
-                st.session_state.watchlist.append({"id": nid, "name": f"股票 {nid}"})
-                # 同步到網址，這樣重新整理就不會消失
-                st.query_params["wl"] = json.dumps(st.session_state.watchlist)
-                st.rerun()
+                with st.spinner('正在搜尋中文名稱...'):
+                    zh_name = get_stock_name_zh(nid)
+                    st.session_state.watchlist.append({"id": nid, "name": zh_name})
+                    st.query_params["wl"] = json.dumps(st.session_state.watchlist)
+                    st.rerun()
 
-# 顯示監控內容
+# --- 顯示清單 ---
 ids = [x['id'] for x in st.session_state.watchlist]
 fm_df = get_fm_data(ids, st.session_state.fm_token)
 twse_data = get_twse_live(ids)
 
 for idx, s in enumerate(st.session_state.watchlist):
     code = s['id']
-    # 取得名稱與技術指標 (快取優化)
-    real_name, y_p, y_c, vk, vd, vma, vsig = get_tech_and_name(code)
+    y_p, y_c, vk, vd, vma, vsig = get_tech_data(code)
     
     price, chg, utag = 0.0, 0.0, ""
     
@@ -163,13 +175,13 @@ for idx, s in enumerate(st.session_state.watchlist):
     if abs(chg) >= warn_p:
         utag = f'<span class="urgent-tag {"down" if chg < 0 else ""}">{"⚡急漲" if chg > 0 else "📉急跌"}</span>'
 
-    # 渲染
+    # 渲染卡片
     b_cls = "up-border" if chg > 0 else "down-border" if chg < 0 else ""
     st.markdown(f"""
     <div class="stock-card {b_cls}">
         <div style="display:flex; justify-content:space-between; align-items:center;">
             <div>
-                <div style="font-weight:900; font-size:1.1rem;">{real_name} {utag}</div>
+                <div style="font-weight:900; font-size:1.1rem;">{s['name']} {utag}</div>
                 <div style="font-size:0.75rem; color:#64748b;">{code}.TW</div>
             </div>
             <div style="text-align:right;">
@@ -186,8 +198,7 @@ for idx, s in enumerate(st.session_state.watchlist):
     </div>
     """, unsafe_allow_html=True)
 
-    # 移除按鈕 (放在卡片下方方便點擊)
-    if st.button(f"🗑️ 移除 {code}", key=f"del_{code}"):
+    if st.button(f"🗑️ 移除 {s['name']}", key=f"del_{code}"):
         st.session_state.watchlist.pop(idx)
         st.query_params["wl"] = json.dumps(st.session_state.watchlist)
         st.rerun()
