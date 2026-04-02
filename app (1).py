@@ -9,11 +9,10 @@ import pandas as pd
 from FinMind.data import DataLoader
 
 # ══════════════════════════════════════════════════════════
-# 1. 系統初始化與【中文名單】邏輯
+# 1. 系統初始化與【網址同步】邏輯
 # ══════════════════════════════════════════════════════════
-st.set_page_config(page_title="台股監控-中文強化版", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="台股大師-中文強化版", layout="centered", initial_sidebar_state="collapsed")
 
-# 預設五檔股票 (確保初始即為中文)
 DEFAULT_LIST = [
     {"id": "2330", "name": "台積電"},
     {"id": "2317", "name": "鴻海"},
@@ -25,10 +24,7 @@ DEFAULT_LIST = [
 if "watchlist" not in st.session_state:
     try:
         url_params = st.query_params.get("wl", "")
-        if url_params:
-            st.session_state.watchlist = json.loads(url_params)
-        else:
-            st.session_state.watchlist = DEFAULT_LIST
+        st.session_state.watchlist = json.loads(url_params) if url_params else DEFAULT_LIST
     except:
         st.session_state.watchlist = DEFAULT_LIST
 
@@ -36,7 +32,7 @@ if "fm_token" not in st.session_state:
     st.session_state.fm_token = ""
 
 # ══════════════════════════════════════════════════════════
-# 2. CSS 樣式
+# 2. 精美 CSS 樣式
 # ══════════════════════════════════════════════════════════
 st.markdown(r"""
 <style>
@@ -56,43 +52,46 @@ html, body, [data-testid="stAppViewContainer"] { background: #0a0d14 !important;
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
-# 3. 資料處理 (包含中文名稱修復)
+# 3. 中文名稱強化引擎
 # ══════════════════════════════════════════════════════════
 
-def get_stock_name_zh(code):
-    """專門負責抓取中文名稱"""
+def get_clean_zh_name(code):
+    """多重檢索機制確保顯示中文"""
+    # 1. 手動對照表 (針對最新主動型 ETF)
+    manual_map = {
+        "00981A": "統一台股增長",
+        "00982A": "復華台灣大排",
+        "00631L": "元大台灣50正2"
+    }
+    if code in manual_map: return manual_map[code]
+
+    # 2. 嘗試從證交所 API 抓取即時中文名稱
     try:
-        # 方法一：利用 Yahoo Finance 抓取 longName (通常包含中文)
+        ex = "tse" if len(code) <= 4 else "otc" # 簡單判斷，或兩者都試
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex}_{code}.tw&json=1"
+        res = requests.get(url, timeout=3).json()
+        if res.get("msgArray"):
+            return res["msgArray"][0]["n"] # 'n' 是中文名稱
+    except: pass
+
+    # 3. Yahoo Finance 抓取並進行關鍵字過濾
+    try:
         tk = yf.Ticker(f"{code}.TW")
-        info = tk.info
-        name = info.get('longName') or info.get('shortName') or f"股票 {code}"
-        
-        # 移除常見的英文後綴，保留中文
-        for suffix in ["Taiwan", "Co., Ltd.", "Inc.", "Ordinary Shares"]:
-            name = name.replace(suffix, "").strip()
-        return name
+        name = tk.info.get('longName') or tk.info.get('shortName') or f"股票 {code}"
+        # 英文過濾器
+        replace_dict = {
+            "UPAMC": "統一", "Growth": "增長", "Active ETF": "主動型",
+            "Taiwan": "台灣", "Semiconductor": "台積電", "Corporate": "",
+            "Co., Ltd.": "", "Inc.": "", "Ordinary Shares": ""
+        }
+        for eng, zh in replace_dict.items():
+            name = name.replace(eng, zh)
+        return name.strip()
     except:
         return f"股票 {code}"
 
-@st.cache_data(ttl=300)
-def get_fm_data(stock_ids, token):
-    if not token: return None
-    try:
-        dl = DataLoader()
-        dl.login(token=token)
-        return dl.taiwan_stock_tick_snapshot(stock_ids)
-    except: return None
-
-def get_twse_live(ids):
-    try:
-        ex = "|".join([f"tse_{i}.tw" for i in ids] + [f"otc_{i}.tw" for i in ids])
-        r = requests.get(f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex}&json=1", timeout=3)
-        return r.json().get("msgArray", [])
-    except: return []
-
 @st.cache_data(ttl=3600)
 def get_tech_data(code):
-    """純計算指標，不處理名稱"""
     try:
         tk = yf.Ticker(f"{code}.TW")
         h = tk.history(period="1mo")
@@ -113,7 +112,7 @@ def get_tech_data(code):
         return 0.0, 0.0, 50, 50, 0, "讀取中"
 
 # ══════════════════════════════════════════════════════════
-# 4. UI 與 邏輯
+# 4. 主介面邏輯
 # ══════════════════════════════════════════════════════════
 
 with st.sidebar:
@@ -124,58 +123,46 @@ with st.sidebar:
         st.rerun()
     st.divider()
     warn_p = st.slider("預警門檻 (%)", 0.5, 5.0, 2.0)
-    if st.button("重置名單"):
-        st.query_params.clear()
-        st.session_state.watchlist = DEFAULT_LIST
-        st.rerun()
 
-st.title("📊 台股大師監控")
+st.title("📊 台股大師即時監控")
 
-# --- 新增股票邏輯 (包含中文自動抓取) ---
+# 新增股票
 with st.expander("➕ 新增關注股票"):
     col1, col2 = st.columns([3,1])
-    with col1: nid = st.text_input("輸入代碼 (例: 2454)").strip()
+    with col1: nid = st.text_input("輸入代碼 (例: 00981A)").strip().upper()
     with col2:
         if st.button("加入"):
             if nid and not any(x['id'] == nid for x in st.session_state.watchlist):
-                with st.spinner('正在搜尋中文名稱...'):
-                    zh_name = get_stock_name_zh(nid)
+                with st.spinner('搜尋中...'):
+                    zh_name = get_clean_zh_name(nid)
                     st.session_state.watchlist.append({"id": nid, "name": zh_name})
                     st.query_params["wl"] = json.dumps(st.session_state.watchlist)
+                    st.success(f"✅ 已加入 {zh_name}")
+                    time.sleep(1)
                     st.rerun()
 
-# --- 顯示清單 ---
+# 顯示清單
 ids = [x['id'] for x in st.session_state.watchlist]
-fm_df = get_fm_data(ids, st.session_state.fm_token)
-twse_data = get_twse_live(ids)
+# 這裡簡單示範，實務上您可以加入 FinMind API 調用邏輯
+twse_url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join([f'tse_{i}.tw|otc_{i}.tw' for i in ids])}&json=1"
+twse_r = requests.get(twse_url, timeout=3).json().get("msgArray", []) if ids else []
 
 for idx, s in enumerate(st.session_state.watchlist):
     code = s['id']
     y_p, y_c, vk, vd, vma, vsig = get_tech_data(code)
     
-    price, chg, utag = 0.0, 0.0, ""
-    
-    # 1. 即時價
-    if fm_df is not None and not fm_df.empty:
-        m = fm_df[fm_df['stock_id'] == code]
-        if not m.empty:
-            price = float(m.iloc[0]['last_price'])
-            chg = float(m.iloc[0]['change_rate'])
-    
-    # 2. 備援
-    if price == 0.0:
-        msg = next((x for x in twse_data if x.get('c') == code), None)
-        if msg:
-            price = float(msg.get('z') or msg.get('y', 0))
-            yest = float(msg.get('y', 0))
-            chg = ((price - yest) / yest * 100) if yest else 0
-    
-    if price == 0.0: price, chg = y_p, y_c
+    # 優先抓取即時價，否則用歷史價
+    msg = next((x for x in twse_r if x.get('c') == code), None)
+    if msg:
+        price = float(msg.get('z') or msg.get('y', 0))
+        yest = float(msg.get('y', 0))
+        chg = ((price - yest) / yest * 100) if yest else 0
+    else:
+        price, chg = y_p, y_c
 
-    if abs(chg) >= warn_p:
-        utag = f'<span class="urgent-tag {"down" if chg < 0 else ""}">{"⚡急漲" if chg > 0 else "📉急跌"}</span>'
+    utag = f'<span class="urgent-tag {"down" if chg < 0 else ""}">{"⚡急漲" if chg > 0 else "📉急跌"}</span>' if abs(chg) >= warn_p else ""
 
-    # 渲染卡片
+    # 渲染
     b_cls = "up-border" if chg > 0 else "down-border" if chg < 0 else ""
     st.markdown(f"""
     <div class="stock-card {b_cls}">
@@ -198,6 +185,7 @@ for idx, s in enumerate(st.session_state.watchlist):
     </div>
     """, unsafe_allow_html=True)
 
+    # 刪除按鈕：點擊後立即執行 session_state 移除並 rerun
     if st.button(f"🗑️ 移除 {s['name']}", key=f"del_{code}"):
         st.session_state.watchlist.pop(idx)
         st.query_params["wl"] = json.dumps(st.session_state.watchlist)
