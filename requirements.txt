@@ -6,3 +6,5 @@ FinMind
 numpy
 tqdm
 aiohttp
+pandas-ta
+urllib3
