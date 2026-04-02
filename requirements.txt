@@ -1,10 +1,8 @@
 streamlit
-requests
 yfinance
 pandas
-FinMind
-numpy
-tqdm
-aiohttp
 pandas-ta
+requests
+FinMind
 urllib3
+numpy
