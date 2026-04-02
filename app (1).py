@@ -5,8 +5,14 @@ from datetime import datetime
 import time
 import json
 import pandas as pd
-import pandas_ta as ta
 import urllib3
+
+# 嘗試匯入 pandas_ta，若未安裝則顯示友善提示
+try:
+    import pandas_ta as ta
+    HAS_TA = True
+except ImportError:
+    HAS_TA = False
 
 # 忽略 SSL 警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -15,6 +21,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 1. 系統初始化
 # ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="台股 AI 智能全能監控", layout="centered", initial_sidebar_state="expanded")
+
+if not HAS_TA:
+    st.error("請在 requirements.txt 中加入 pandas-ta 以啟用 AI 技術分析功能。")
 
 DEFAULT_LIST = [
     {"id": "2330", "name": "台積電"},
@@ -32,19 +41,18 @@ if "watchlist" not in st.session_state:
         st.session_state.watchlist = DEFAULT_LIST
 
 # ══════════════════════════════════════════════════════════
-# 2. 核心分析引擎 (5大指標)
+# 2. 核心分析引擎 (5大指標邏輯)
 # ══════════════════════════════════════════════════════════
 
 def get_ai_analysis(df, active_metrics):
-    """計算 AI 分數與生成口語建議"""
-    if df is None or len(df) < 30:
-        return 50, "數據讀取中...", "#94a3b8", {}
+    if df is None or len(df) < 30 or not HAS_TA:
+        return 50, "數據讀取中或套件缺失...", "#94a3b8", {}
 
     # 計算技術指標
-    df.ta.kd(high='High', low='Low', close='Close', append=True) # K_9_3, D_9_3
-    df.ta.rsi(length=14, append=True) # RSI_14
-    df.ta.macd(append=True) # MACDh_12_26_9
-    df.ta.bbands(length=20, std=2, append=True) # BBU_20_2.0, BBM_20_2.0, BBL_20_2.0
+    df.ta.kd(high='High', low='Low', close='Close', append=True) 
+    df.ta.rsi(length=14, append=True) 
+    df.ta.macd(append=True) 
+    df.ta.bbands(length=20, std=2, append=True) 
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
@@ -52,74 +60,59 @@ def get_ai_analysis(df, active_metrics):
     curr_p = last['Close']
     
     scores = []
-    reasons = []
-
-    # 1. KD 分析
+    
+    # 1. KD (權重)
     if "KD" in active_metrics:
-        k, d = last['K_9_3'], last['D_9_3']
-        pk = prev['K_9_3']
-        if k < 25 and k > pk: 
-            scores.append(90); reasons.append("KD低檔金叉")
-        elif k > 75 and k < pk: 
-            scores.append(10); reasons.append("KD高檔死叉")
+        k, pk = last['K_9_3'], prev['K_9_3']
+        if k < 25 and k > pk: scores.append(90)
+        elif k > 75 and k < pk: scores.append(10)
         else: scores.append(50)
 
-    # 2. MACD 分析
+    # 2. MACD
     if "MACD" in active_metrics:
-        hist = last['MACDh_12_26_9']
-        p_hist = prev['MACDh_12_26_9']
-        if hist > 0 and p_hist <= 0:
-            scores.append(90); reasons.append("MACD轉正")
-        elif hist < 0 and p_hist >= 0:
-            scores.append(10); reasons.append("MACD轉負")
+        hist, p_hist = last['MACDh_12_26_9'], prev['MACDh_12_26_9']
+        if hist > 0 and p_hist <= 0: scores.append(95)
+        elif hist < 0 and p_hist >= 0: scores.append(5)
         else: scores.append(50)
 
-    # 3. RSI 分析
+    # 3. RSI
     if "RSI" in active_metrics:
         rsi = last['RSI_14']
-        if rsi < 30: scores.append(85); reasons.append("RSI超跌反彈")
-        elif rsi > 70: scores.append(15); reasons.append("RSI超漲過熱")
+        if rsi < 30: scores.append(85)
+        elif rsi > 70: scores.append(15)
         else: scores.append(50)
 
-    # 4. 布林通道 (BB)
+    # 4. 布林通道
     if "布林通道" in active_metrics:
-        if curr_p > last['BBU_20_2.0']:
-            scores.append(95); reasons.append("突破布林上軌")
-        elif curr_p < last['BBL_20_2.0']:
-            scores.append(5); reasons.append("跌破布林下軌")
-        elif curr_p > ma20 and prev['Close'] <= ma20:
-            scores.append(80); reasons.append("站回月線支撐")
+        if curr_p > last['BBU_20_2.0']: scores.append(90)
+        elif curr_p < last['BBL_20_2.0']: scores.append(10)
         else: scores.append(50)
 
-    # 5. 成交量 (Volume)
+    # 5. 成交量
     if "成交量" in active_metrics:
         avg_vol = df['Volume'].tail(5).mean()
-        if last['Volume'] > avg_vol * 1.5 and curr_p > prev['Close']:
-            scores.append(90); reasons.append("量增價揚")
-        elif last['Volume'] > avg_vol * 1.5 and curr_p < prev['Close']:
-            scores.append(10); reasons.append("爆量下跌")
+        if last['Volume'] > avg_vol * 1.5 and curr_p > prev['Close']: scores.append(90)
+        elif last['Volume'] > avg_vol * 1.5 and curr_p < prev['Close']: scores.append(10)
         else: scores.append(50)
 
-    # 計算總分
     final_score = int(sum(scores) / len(scores)) if scores else 50
     
-    # 產出口語化進出場建議
-    color = "#94a3b8" # 預設灰色
+    # 動態建議邏輯
+    color = "#94a3b8"
     advice = "⚖️ 指標震盪，建議靜待方向突破"
     
-    if final_score >= 75:
-        color = "#ef4444" # 紅色
+    if final_score >= 70:
+        color = "#ef4444"
         if curr_p > ma20: advice = "🔥 趨勢偏多建議續抱，量價配合良好"
-        else: advice = "🚀 殺低後站回，指標剛轉強，建議小量試單"
-    elif final_score <= 35:
-        color = "#22c55e" # 綠色
+        else: advice = "🚀 殺低後站回，指標剛轉強，建議分批佈局"
+    elif final_score <= 30:
+        color = "#22c55e"
         if curr_p < ma20: advice = "📉 趨勢轉弱建議減碼，下方支撐不明"
         else: advice = "⚠️ 殺低後雖站回，但上方有壓，建議見好就收"
 
     return final_score, advice, color, {
-        "price": curr_p,
-        "k": last['K_9_3'], "d": last['D_9_3'],
-        "rsi": last['RSI_14'], "macd": last['MACDh_12_26_9']
+        "price": curr_p, "k": last.get('K_9_3', 0), "d": last.get('D_9_3', 0),
+        "rsi": last.get('RSI_14', 0), "macd": last.get('MACDh_12_26_9', 0)
     }
 
 # ══════════════════════════════════════════════════════════
@@ -132,12 +125,11 @@ html, body, [data-testid="stAppViewContainer"] { background: #0a0d14 !important;
 .stock-card { background: linear-gradient(135deg, #111827 0%, #0f172a 100%); border: 1px solid rgba(255,255,255,0.1); border-radius: 18px; padding: 1.2rem; margin-bottom: 1rem; border-left: 5px solid #38bdf8; }
 .score-circle { width: 45px; height: 45px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 1.1rem; border: 2px solid; }
 .advice-box { background: rgba(255,255,255,0.03); border-radius: 10px; padding: 10px; margin-top: 10px; font-size: 0.85rem; line-height: 1.5; }
-.price-text { font-size: 1.6rem; font-weight: 700; font-family: 'Monaco', monospace; }
 </style>
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
-# 4. 主介面交互
+# 4. 主介面
 # ══════════════════════════════════════════════════════════
 
 with st.sidebar:
@@ -145,19 +137,18 @@ with st.sidebar:
     selected_metrics = st.multiselect(
         "選擇要啟用的分析指標：",
         ["KD", "MACD", "RSI", "布林通道", "成交量"],
-        default=["KD", "MACD", "RSI"]
+        default=["KD", "MACD", "RSI", "布林通道", "成交量"]
     )
     st.divider()
     warn_p = st.slider("即時漲跌幅預警門檻 (%)", 0.5, 5.0, 2.0)
-    
     if st.button("🔄 重置預設清單"):
         st.query_params.clear()
         st.session_state.watchlist = DEFAULT_LIST
         st.rerun()
 
-st.title("📊 台股 AI 智能決策系統")
+st.title("📊 台股 AI 全能監控系統")
 
-# 新增股票邏輯
+# 新增股票
 with st.expander("➕ 新增關注股票"):
     col1, col2 = st.columns([3,1])
     with col1: nid = st.text_input("輸入代碼 (例: 00981A)").strip().upper()
@@ -177,8 +168,6 @@ for idx, s in enumerate(st.session_state.watchlist):
         if hist.empty: continue
         
         score, advice, color, vals = get_ai_analysis(hist, selected_metrics)
-        
-        # 即時漲跌計算
         day_chg = ((vals['price'] - hist['Close'].iloc[-2]) / hist['Close'].iloc[-2] * 100)
         urgent_blink = "🚨" if abs(day_chg) >= warn_p else ""
 
@@ -186,8 +175,8 @@ for idx, s in enumerate(st.session_state.watchlist):
         <div class="stock-card" style="border-left-color: {color}">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div>
-                    <span style="font-weight:900; font-size:1.2rem;">{s['name']}</span>
-                    <span style="color:#64748b; font-size:0.8rem; margin-left:5px;">{code}.TW {urgent_blink}</span>
+                    <span style="font-weight:900; font-size:1.1rem;">{s['name']}</span>
+                    <span style="color:#64748b; font-size:0.75rem; margin-left:5px;">{code}.TW {urgent_blink}</span>
                 </div>
                 <div class="score-circle" style="color: {color}; border-color: {color}">
                     {score}
@@ -195,7 +184,7 @@ for idx, s in enumerate(st.session_state.watchlist):
             </div>
             
             <div style="display:flex; justify-content:space-between; align-items:flex-end; margin-top:10px;">
-                <div class="price-text">{vals['price']:.2f} <span style="font-size:1rem; color:{color};">{day_chg:+.2f}%</span></div>
+                <div style="font-size:1.5rem; font-weight:700;">{vals['price']:.2f} <span style="font-size:0.9rem; color:{color};">{day_chg:+.2f}%</span></div>
                 <div style="text-align:right; font-size:0.7rem; color:#94a3b8;">
                     KD: {vals['k']:.1f}/{vals['d']:.1f} | RSI: {vals['rsi']:.1f}
                 </div>
@@ -213,9 +202,8 @@ for idx, s in enumerate(st.session_state.watchlist):
             st.query_params["wl"] = json.dumps(st.session_state.watchlist)
             st.rerun()
             
-    except Exception as e:
+    except:
         st.error(f"代碼 {code} 讀取失敗")
 
-# 自動刷新
 time.sleep(60)
 st.rerun()
