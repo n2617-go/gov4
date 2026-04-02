@@ -7,11 +7,15 @@ import time
 import json
 import pandas as pd
 from FinMind.data import DataLoader
+import urllib3
+
+# 關閉不安全請求的警告訊息（因為我們會用到 verify=False）
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ══════════════════════════════════════════════════════════
-# 1. 系統初始化與【網址同步】邏輯
+# 1. 系統初始化
 # ══════════════════════════════════════════════════════════
-st.set_page_config(page_title="台股大師-中文強化版", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="台股大師-穩定修復版", layout="centered", initial_sidebar_state="collapsed")
 
 DEFAULT_LIST = [
     {"id": "2330", "name": "台積電"},
@@ -52,41 +56,29 @@ html, body, [data-testid="stAppViewContainer"] { background: #0a0d14 !important;
 """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════
-# 3. 中文名稱強化引擎
+# 3. 核心工具 (加入 SSL 忽略與 Header)
 # ══════════════════════════════════════════════════════════
 
+# 模擬真實瀏覽器 Header
+REQ_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+}
+
 def get_clean_zh_name(code):
-    """多重檢索機制確保顯示中文"""
-    # 1. 手動對照表 (針對最新主動型 ETF)
-    manual_map = {
-        "00981A": "統一台股增長",
-        "00982A": "復華台灣大排",
-        "00631L": "元大台灣50正2"
-    }
+    manual_map = {"00981A": "統一台股增長", "00982A": "復華台灣大排", "00631L": "元大台灣50正2"}
     if code in manual_map: return manual_map[code]
-
-    # 2. 嘗試從證交所 API 抓取即時中文名稱
     try:
-        ex = "tse" if len(code) <= 4 else "otc" # 簡單判斷，或兩者都試
-        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex}_{code}.tw&json=1"
-        res = requests.get(url, timeout=3).json()
+        # 修正：加入 verify=False 與 headers
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_{code}.tw|otc_{code}.tw&json=1"
+        res = requests.get(url, headers=REQ_HEADERS, verify=False, timeout=5).json()
         if res.get("msgArray"):
-            return res["msgArray"][0]["n"] # 'n' 是中文名稱
+            return res["msgArray"][0]["n"]
     except: pass
-
-    # 3. Yahoo Finance 抓取並進行關鍵字過濾
+    
     try:
         tk = yf.Ticker(f"{code}.TW")
         name = tk.info.get('longName') or tk.info.get('shortName') or f"股票 {code}"
-        # 英文過濾器
-        replace_dict = {
-            "UPAMC": "統一", "Growth": "增長", "Active ETF": "主動型",
-            "Taiwan": "台灣", "Semiconductor": "台積電", "Corporate": "",
-            "Co., Ltd.": "", "Inc.": "", "Ordinary Shares": ""
-        }
-        for eng, zh in replace_dict.items():
-            name = name.replace(eng, zh)
-        return name.strip()
+        return name.replace("UPAMC", "統一").replace("Active ETF", "主動型").strip()
     except:
         return f"股票 {code}"
 
@@ -106,8 +98,7 @@ def get_tech_data(code):
             k = (2/3)*k + (1/3)*v
             d = (2/3)*d + (1/3)*k
         ma20 = h['Close'].rolling(20).mean().iloc[-1]
-        sig = "🔥金叉" if k > d and k < 30 else "⚠️死叉" if k < d and k > 70 else "⚖️整理"
-        return last_p, y_chg, k, d, ma20, sig
+        return last_p, y_chg, k, d, ma20, "⚖️整理"
     except:
         return 0.0, 0.0, 50, 50, 0, "讀取中"
 
@@ -123,10 +114,13 @@ with st.sidebar:
         st.rerun()
     st.divider()
     warn_p = st.slider("預警門檻 (%)", 0.5, 5.0, 2.0)
+    if st.button("重置名單"):
+        st.query_params.clear()
+        st.session_state.watchlist = DEFAULT_LIST
+        st.rerun()
 
 st.title("📊 台股大師即時監控")
 
-# 新增股票
 with st.expander("➕ 新增關注股票"):
     col1, col2 = st.columns([3,1])
     with col1: nid = st.text_input("輸入代碼 (例: 00981A)").strip().upper()
@@ -141,17 +135,23 @@ with st.expander("➕ 新增關注股票"):
                     time.sleep(1)
                     st.rerun()
 
-# 顯示清單
+# 核心修正：抓取即時資料加入錯誤處理與 verify=False
 ids = [x['id'] for x in st.session_state.watchlist]
-# 這裡簡單示範，實務上您可以加入 FinMind API 調用邏輯
-twse_url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join([f'tse_{i}.tw|otc_{i}.tw' for i in ids])}&json=1"
-twse_r = requests.get(twse_url, timeout=3).json().get("msgArray", []) if ids else []
+twse_r = []
+if ids:
+    try:
+        twse_url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={'|'.join([f'tse_{i}.tw|otc_{i}.tw' for i in ids])}&json=1"
+        resp = requests.get(twse_url, headers=REQ_HEADERS, verify=False, timeout=5)
+        twse_r = resp.json().get("msgArray", [])
+    except Exception as e:
+        # 如果證交所掛掉，保持 twse_r 為空，讓程式用歷史資料撐著
+        twse_r = []
 
 for idx, s in enumerate(st.session_state.watchlist):
     code = s['id']
-    y_p, y_c, vk, vd, vma, vsig = get_tech_data(code)
+    y_p, y_c, vk, vd, vma, _ = get_tech_data(code)
     
-    # 優先抓取即時價，否則用歷史價
+    # 邏輯判定現價
     msg = next((x for x in twse_r if x.get('c') == code), None)
     if msg:
         price = float(msg.get('z') or msg.get('y', 0))
@@ -160,9 +160,9 @@ for idx, s in enumerate(st.session_state.watchlist):
     else:
         price, chg = y_p, y_c
 
+    vsig = "🔥金叉" if vk > vd and vk < 30 else "⚠️死叉" if vk < vd and vk > 70 else "⚖️整理"
     utag = f'<span class="urgent-tag {"down" if chg < 0 else ""}">{"⚡急漲" if chg > 0 else "📉急跌"}</span>' if abs(chg) >= warn_p else ""
 
-    # 渲染
     b_cls = "up-border" if chg > 0 else "down-border" if chg < 0 else ""
     st.markdown(f"""
     <div class="stock-card {b_cls}">
@@ -185,7 +185,6 @@ for idx, s in enumerate(st.session_state.watchlist):
     </div>
     """, unsafe_allow_html=True)
 
-    # 刪除按鈕：點擊後立即執行 session_state 移除並 rerun
     if st.button(f"🗑️ 移除 {s['name']}", key=f"del_{code}"):
         st.session_state.watchlist.pop(idx)
         st.query_params["wl"] = json.dumps(st.session_state.watchlist)
