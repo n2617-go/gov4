@@ -5,3 +5,4 @@ FinMind
 tqdm
 yfinance
 streamlit-cookies-controller
+requests-cache
