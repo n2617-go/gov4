@@ -7,11 +7,13 @@ from datetime import datetime, timedelta
 from streamlit_cookies_controller import CookieController
 
 # ══════════════════════════════════════════════════════════
-# 1. 系統初始化與 Cookies 永久儲存邏輯
+# 1. 系統初始化與 Cookies 讀取 (Token + Watchlist)
 # ══════════════════════════════════════════════════════════
 controller = CookieController()
+cookie_token = controller.get('finmind_token')
 cookie_watchlist = controller.get('user_watchlist')
 
+# 初始化 Watchlist
 if "watchlist" not in st.session_state:
     if cookie_watchlist:
         try:
@@ -21,14 +23,18 @@ if "watchlist" not in st.session_state:
     else:
         st.session_state.watchlist = ["2330", "2317", "2603", "2454"]
 
+# 初始化 Token (從 Cookie 載入)
+if "tk" not in st.session_state and cookie_token:
+    st.session_state.tk = cookie_token
+
 # ══════════════════════════════════════════════════════════
-# 2. 核心分析引擎：五大指標計算
+# 2. 核心分析引擎
 # ══════════════════════════════════════════════════════════
 def get_stock_data(code):
     yf_code = code + ".TW" if len(code) <= 4 else code + ".TWO"
     try:
         ticker = yf.Ticker(yf_code)
-        df = ticker.history(period="6mo") # 抓半年數據確保指標精準
+        df = ticker.history(period="6mo")
         if not df.empty:
             info = ticker.info
             name = info.get('longName') or info.get('shortName') or f"個股 {code}"
@@ -40,67 +46,75 @@ def get_stock_data(code):
 
 def analyze_stock(df, m_list, warn_p):
     if df.empty or len(df) < 20:
-        return 50, [], "數據不足", "累積數據中，請稍候...", "觀望", False
-
-    # 數據清理
+        return 50, [], "數據不足", "累積數據中...", "觀望", False
+    
+    # 確保數值正確
     df['close'] = pd.to_numeric(df['close'], errors='coerce')
     df = df.dropna(subset=['close']).reset_index(drop=True)
     
     matches = []
-    # --- 1. RSI (14日) ---
+    # RSI (14)
     diff = df['close'].diff()
     gain = diff.where(diff > 0, 0).rolling(14).mean()
     loss = -diff.where(diff < 0, 0).rolling(14).mean()
     df['RSI'] = 100 - (100 / (1 + (gain / (loss + 0.0001))))
-    
-    # --- 2. KD (9日) ---
+    # KD (9)
     l9, h9 = df['min'].rolling(9).min(), df['max'].rolling(9).max()
     df['K'] = (100 * ((df['close'] - l9) / (h9 - l9 + 0.0001))).ewm(com=2, adjust=False).mean()
-    
-    # --- 3. MACD ---
-    ema12 = df['close'].ewm(span=12).mean()
-    ema26 = df['close'].ewm(span=26).mean()
+    # MACD
+    ema12, ema26 = df['close'].ewm(span=12).mean(), df['close'].ewm(span=26).mean()
     df['OSC'] = (ema12 - ema26) - (ema12 - ema26).ewm(span=9).mean()
-    
-    # --- 4. 布林通道 ---
+    # 布林
     df['MA20'] = df['close'].rolling(20).mean()
-    df['std'] = df['close'].rolling(20).std()
-    df['Up'] = df['MA20'] + (df['std'] * 2)
-    
-    # --- 5. 成交量 ---
+    df['Up'] = df['MA20'] + (df['close'].rolling(20).std() * 2)
+    # 量
     df['v_ma5'] = df['volume'].rolling(5).mean()
 
     last, prev = df.iloc[-1], df.iloc[-2]
     
-    # 指標判定
-    if "KD" in m_list and last['K'] < 30 and last['K'] > prev['K']: matches.append("🔥 KD低檔轉強")
+    if "KD" in m_list and last['K'] < 35 and last['K'] > prev['K']: matches.append("🔥 KD轉強")
     if "MACD" in m_list and last['OSC'] > 0 and prev['OSC'] <= 0: matches.append("🚀 MACD翻紅")
     if "RSI" in m_list and last['RSI'] > 50 and prev['RSI'] <= 50: matches.append("📈 RSI強勢")
     if "布林通道" in m_list and last['close'] > last['Up']: matches.append("🌌 突破布林")
     if "成交量" in m_list and last['volume'] > last['v_ma5'] * 1.5: matches.append("📊 量能爆發")
 
-    # 漲跌幅門檻檢查
     chg = (last['close'] - prev['close']) / prev['close'] * 100
     is_warning = abs(chg) >= warn_p
     
-    # 決策說明
     status, strategy = "中性觀察", "觀望"
-    reason = "目前各項技術指標訊號分散，建議靜待明確突破。"
+    reason = "目前多空訊號不明，建議靜待突破。"
     if len(matches) >= 3 and chg > 0:
         status, strategy = "多頭共振", "強力續抱"
-        reason = f"符合 {len(matches)} 項指標，且股價處於上升軌道，動能極強。"
+        reason = f"符合 {len(matches)} 項指標，股價動能極強。"
     elif last['close'] < last['MA20']:
         status, strategy = "轉弱訊號", "減碼規避"
-        reason = "股價跌破 20 日月線支撐，短期趨勢轉空，需注意風險。"
+        reason = "股價跌破月線，短期趨勢轉空。"
 
     score = int(50 + (len(matches) * 10))
     return score, matches, status, reason, strategy, is_warning
 
 # ══════════════════════════════════════════════════════════
-# 3. UI 渲染介面
+# 3. 登入 UI 阻擋 (Token 功能補回)
 # ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="AI 股市監控旗艦版", layout="centered")
 
+if not st.session_state.get("tk"):
+    st.title("🛡️ 專業監控系統登入")
+    tk_input = st.text_input("請輸入授權 Token", type="password")
+    if st.button("驗證並登入"):
+        if tk_input:
+            st.session_state.tk = tk_input
+            controller.set('finmind_token', tk_input, max_age=2592000) # 記住 30 天
+            st.success("登入成功！正在載入數據...")
+            time.sleep(0.5)
+            st.rerun()
+        else:
+            st.error("請輸入正確的 Token")
+    st.stop() # 未登入則停止執行後續程式
+
+# ══════════════════════════════════════════════════════════
+# 4. 主 UI 介面 (側邊欄登出與設定)
+# ══════════════════════════════════════════════════════════
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background-color: #0a0d14; color: white; }
@@ -111,41 +125,45 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 側邊欄：功能開關與門檻
 with st.sidebar:
-    st.header("⚙️ 參數設定")
+    st.header("⚙️ 控制中心")
     m_list = st.multiselect("啟用指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
     warn_p = st.slider("預警門檻 (%)", 0.5, 10.0, 1.5)
     
     st.divider()
-    new_code = st.text_input("➕ 新增股票代碼")
+    new_code = st.text_input("➕ 新增代碼")
     if st.button("確認新增"):
         if new_code and new_code not in st.session_state.watchlist:
             st.session_state.watchlist.append(new_code.strip())
             controller.set('user_watchlist', json.dumps(st.session_state.watchlist), max_age=2592000)
-            st.success(f"已新增 {new_code}"); time.sleep(0.5); st.rerun()
+            st.rerun()
+    
+    st.divider()
+    if st.button("🚪 登出系統"):
+        controller.remove('finmind_token')
+        st.session_state.tk = None
+        st.rerun()
 
 st.title("⚡ AI 自動監控面板")
 
 for code in list(st.session_state.watchlist):
     df, c_name = get_stock_data(code)
     if df.empty:
-        st.warning(f"⚠️ 無法取得 {code} 數據"); continue
+        st.warning(f"⚠️ 無法抓取 {code}")
+        continue
 
-    # 分析並顯示
     score, matches, status, reason, strategy, is_warn = analyze_stock(df, m_list, warn_p)
     last_p = df.iloc[-1]['close']
     prev_p = df.iloc[-2]['close']
     chg = (last_p - prev_p) / prev_p * 100
     color = "#ef4444" if chg >= 0 else "#22c55e"
     
-    # 渲染卡片
     html_card = f'''
     <div class="card" style="border-left-color: {color}">
         {f'<div class="warn-label">⚠️ 波動達 {warn_p}%</div>' if is_warn else ''}
         <div style="float:right; text-align:right;">
             <div style="color:{color}; font-size:1.5rem; font-weight:bold;">{score}</div>
-            <div style="color:#38bdf8; font-size:0.8rem; font-weight:bold;">{strategy}</div>
+            <div style="color:#38bdf8; font-size:0.85rem; font-weight:bold;">{strategy}</div>
         </div>
         <div style="font-size:1.1rem; font-weight:bold;">{c_name} ({code})</div>
         <div style="font-size:2rem; font-weight:900; color:{color}; margin:10px 0;">
