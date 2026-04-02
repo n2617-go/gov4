@@ -6,37 +6,40 @@ import time
 import json
 
 # ══════════════════════════════════════════════════════════
-# 1. 技術指標數學公式 (自力救濟版，不需額外套件)
+# 1. 技術指標數學公式 (自寫版，確保不需依賴額外套件)
 # ══════════════════════════════════════════════════════════
 
 def compute_indicators(df):
-    # RSI 計算
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
+    try:
+        # RSI (14)
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
 
-    # KD 計算 (9, 3, 3)
-    low_min = df['Low'].rolling(window=9).min()
-    high_max = df['High'].rolling(window=9).max()
-    rsv = 100 * ((df['Close'] - low_min) / (high_max - low_min))
-    df['K'] = rsv.ewm(com=2).mean()
-    df['D'] = df['K'].ewm(com=2).mean()
+        # KD (9, 3, 3)
+        low_min = df['Low'].rolling(window=9).min()
+        high_max = df['High'].rolling(window=9).max()
+        rsv = 100 * ((df['Close'] - low_min) / (high_max - low_min))
+        df['K'] = rsv.ewm(com=2, adjust=False).mean()
+        df['D'] = df['K'].ewm(com=2, adjust=False).mean()
 
-    # MACD 計算 (12, 26, 9)
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    df['DIF'] = exp1 - exp2
-    df['DEM'] = df['DIF'].ewm(span=9, adjust=False).mean()
-    df['OSC'] = df['DIF'] - df['DEM']
+        # MACD (12, 26, 9)
+        exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+        exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+        df['DIF'] = exp1 - exp2
+        df['DEM'] = df['DIF'].ewm(span=9, adjust=False).mean()
+        df['OSC'] = df['DIF'] - df['DEM']
 
-    # 布林通道 (20, 2)
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['STD'] = df['Close'].rolling(window=20).std()
-    df['Upper'] = df['MA20'] + (df['STD'] * 2)
-    df['Lower'] = df['MA20'] - (df['STD'] * 2)
-    return df
+        # 布林通道 (20, 2)
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['STD'] = df['Close'].rolling(window=20).std()
+        df['Upper'] = df['MA20'] + (df['STD'] * 2)
+        df['Lower'] = df['MA20'] - (df['STD'] * 2)
+        return df
+    except:
+        return df
 
 # ══════════════════════════════════════════════════════════
 # 2. 數據抓取與 AI 邏輯
@@ -84,38 +87,82 @@ def analyze_stock(df, metrics):
 # ══════════════════════════════════════════════════════════
 # 3. 介面與顯示
 # ══════════════════════════════════════════════════════════
-st.set_page_config(page_title="台股 AI 監控 (穩定版)", layout="centered")
-st.markdown("<style>html, body, [data-testid='stAppViewContainer'] { background-color: #0a0d14 !important; color: white; }</style>", unsafe_allow_html=True)
+st.set_page_config(page_title="台股 AI 決策監控", layout="centered")
 
+# 設定深色背景 CSS
+st.markdown("""
+<style>
+    html, body, [data-testid="stAppViewContainer"] { background-color: #0a0d14 !important; color: white; }
+    .stButton>button { width: 100%; border-radius: 8px; }
+    .card { background:#111827; padding:20px; border-radius:15px; border-left:6px solid #38bdf8; margin-bottom:15px; position: relative; }
+</style>
+""", unsafe_allow_html=True)
+
+# 初始化 Session State (確保預設股票存在)
 if "watchlist" not in st.session_state:
-    st.session_state.watchlist = [{"id": "2330", "name": "台積電"}]
+    st.session_state.watchlist = [
+        {"id": "2330", "name": "台積電"}, 
+        {"id": "2317", "name": "鴻海"},
+        {"id": "00631L", "name": "元大台灣50正2"}
+    ]
 
+# 側邊欄設定
 with st.sidebar:
-    st.header("⚙️ 決策設定")
-    m_list = st.multiselect("啟用指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
-    warn_p = st.slider("預警門檻 (%)", 0.5, 5.0, 2.0)
+    st.header("⚙️ 決策與監控設定")
+    m_list = st.multiselect("啟用分析指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
+    warn_p = st.slider("即時漲跌預警 (%)", 0.5, 5.0, 2.0)
+    st.divider()
+    if st.button("🔄 重置為預設清單"):
+        st.session_state.watchlist = [{"id": "2330", "name": "台積電"}, {"id": "2317", "name": "鴻海"}]
+        st.rerun()
 
-st.title("📈 台股 AI 決策監控")
+st.title("📈 台股 AI 決策監控系統")
 
-# 渲染卡片
+# --- 補回：新增關注股票的功能區域 ---
+with st.expander("➕ 新增關注股票", expanded=True):
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        new_id = st.text_input("輸入股票代碼 (例: 2454)", key="add_input").strip().upper()
+    with c2:
+        if st.button("加入監控"):
+            if new_id and not any(s['id'] == new_id for s in st.session_state.watchlist):
+                st.session_state.watchlist.append({"id": new_id, "name": new_id})
+                st.rerun()
+
+st.divider()
+
+# 顯示股票卡片
 for idx, s in enumerate(st.session_state.watchlist):
     df = get_stock_data(s['id'])
     if df is not None:
         score, advice, color, last = analyze_stock(df, m_list)
         chg = ((last['Close'] - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100)
         
+        # 繪製美化卡片
         st.markdown(f"""
-        <div style="background:#111827; padding:20px; border-radius:15px; border-left:6px solid {color}; margin-bottom:10px;">
-            <div style="float:right; font-size:24px; font-weight:bold; color:{color}; border:2px solid {color}; border-radius:50%; width:50px; height:50px; display:flex; align-items:center; justify-content:center;">{score}</div>
-            <h3 style="margin:0;">{s['name']} ({s['id']}) {"🚨" if abs(chg)>=warn_p else ""}</h3>
-            <h2 style="color:{color}; margin:10px 0;">{last['Close']:.2f} <span style="font-size:16px;">({chg:+.2f}%)</span></h2>
-            <div style="background:rgba(255,255,255,0.05); padding:10px; border-radius:8px;">
-                <b style="color:{color}">💡 AI 決策建議：</b><br>{advice}
+        <div class="card" style="border-left-color: {color};">
+            <div style="float:right; font-size:24px; font-weight:bold; color:{color}; border:2px solid {color}; border-radius:50%; width:52px; height:52px; display:flex; align-items:center; justify-content:center;">
+                {score}
+            </div>
+            <div style="font-size: 1.1rem; font-weight: bold; margin-bottom: 5px;">
+                {s['name']} <span style="color:#64748b; font-size:0.8rem;">({s['id']})</span> {"🚨" if abs(chg)>=warn_p else ""}
+            </div>
+            <div style="font-size: 1.8rem; font-weight: 900; color: {color};">
+                {last['Close']:.2f} <span style="font-size: 0.9rem;">({chg:+.2f}%)</span>
+            </div>
+            <div style="margin-top: 12px; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 8px; font-size: 0.9rem;">
+                <b style="color: {color}">💡 AI 決策建議：</b><br>{advice}
             </div>
         </div>
         """, unsafe_allow_html=True)
+        
+        # 移除按鈕 (放在卡片下方)
+        if st.button(f"🗑️ 移除 {s['id']}", key=f"del_{idx}"):
+            st.session_state.watchlist.pop(idx)
+            st.rerun()
     else:
-        st.error(f"代碼 {s['id']} 資料讀取失敗")
+        st.error(f"❌ 無法讀取 {s['id']} 的資料，請確認代碼是否正確。")
 
+# 自動每分鐘更新
 time.sleep(60)
 st.rerun()
