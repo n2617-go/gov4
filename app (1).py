@@ -1,112 +1,92 @@
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
+import requests
+import re
 
 # ══════════════════════════════════════════════════════════
-# 1. 技術指標運算與訊號判定
+# 1. 中文名稱救援系統 (內建對照表 + 網頁爬蟲雙保險)
 # ══════════════════════════════════════════════════════════
-def compute_analysis(df, m_list):
+STOCK_DB = {
+    "2330": "台積電", "2317": "鴻海", "00631L": "元大台灣50正2", 
+    "2454": "聯發科", "2603": "長榮", "2308": "台達電", 
+    "2382": "廣達", "2357": "華碩", "3008": "大立光", "0050": "元大台灣50"
+}
+
+def get_chinese_name(code):
+    if code in STOCK_DB:
+        return STOCK_DB[code]
     try:
-        df = df.copy()
-        # RSI (14)
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-        
-        # KD (9, 3, 3)
-        low_min, high_max = df['Low'].rolling(9).min(), df['High'].rolling(9).max()
-        rsv = 100 * ((df['Close'] - low_min) / (high_max - low_min))
-        df['K'] = rsv.ewm(com=2, adjust=False).mean()
-        df['D'] = df['K'].ewm(com=2, adjust=False).mean()
-        
-        # MACD (12, 26, 9)
-        exp1, exp2 = df['Close'].ewm(span=12, adjust=False).mean(), df['Close'].ewm(span=26, adjust=False).mean()
-        df['DIF'] = exp1 - exp2
-        df['DEM'] = df['DIF'].ewm(span=9, adjust=False).mean()
-        df['OSC'] = df['DIF'] - df['DEM']
-        
-        # 布林通道 (20, 2)
-        df['MA20'] = df['Close'].rolling(20).mean()
-        df['STD'] = df['Close'].rolling(20).std()
-        df['Upper'] = df['MA20'] + (df['STD'] * 2)
-        df['Lower'] = df['MA20'] - (df['STD'] * 2)
-        
-        last, prev = df.iloc[-1], df.iloc[-2]
-        
-        # 判定各指標是否符合多方條件
-        matches = []
-        scores = []
-        
-        if "KD" in m_list:
-            is_match = last['K'] < 30 and last['K'] > prev['K']
-            if is_match: matches.append("🔥 KD低檔轉強")
-            scores.append(90 if is_match else 50)
-            
-        if "MACD" in m_list:
-            is_match = last['OSC'] > 0 and prev['OSC'] <= 0
-            if is_match: matches.append("🚀 MACD翻紅")
-            scores.append(95 if is_match else 50)
-            
-        if "RSI" in m_list:
-            is_match = last['RSI'] < 40 and last['RSI'] > prev['RSI']
-            if is_match: matches.append("📈 RSI轉強")
-            scores.append(85 if is_match else 50)
-            
-        if "布林通道" in m_list:
-            is_match = last['Close'] > last['MA20']
-            if is_match: matches.append("🌌 站上月線")
-            scores.append(90 if is_match else 50)
-            
-        if "成交量" in m_list:
-            v_ma = df['Volume'].tail(5).mean()
-            is_match = last['Volume'] > v_ma * 1.5
-            if is_match: matches.append("📊 量能爆發")
-            scores.append(90 if is_match else 50)
-
-        score = int(sum(scores)/len(scores)) if scores else 50
-        return df, score, matches
+        # 爬取 Yahoo Finance 網頁標題來獲取精準中文名
+        url = f"https://tw.stock.yahoo.com/quote/{code}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=5)
+        pattern = r"<title>(.*?) \({code}\)".format(code=code)
+        match = re.search(pattern, response.text)
+        if match:
+            return match.group(1)
     except:
-        return df, 50, []
+        pass
+    return f"個股 {code}"
 
 # ══════════════════════════════════════════════════════════
-# 2. 數據抓取與名稱修復
+# 2. 極短線技術指標與訊號
 # ══════════════════════════════════════════════════════════
-@st.cache_data(ttl=300)
-def get_stock_full_info(code, m_list):
-    for sfx in [".TW", ".TWO"]:
-        try:
-            tk = yf.Ticker(f"{code}{sfx}")
-            df = tk.history(period="6mo", interval="1d", auto_adjust=True)
-            if not df.empty and len(df) > 30:
-                # 強制刷新 info 獲取中文名
-                info = tk.info
-                name = info.get('longName') or info.get('shortName') or code
-                # 清洗名稱，若無中文則顯示代碼
-                c_name = name if any(ord(c) > 127 for c in name) else f"股票 {code}"
-                df_analyzed, score, matches = compute_analysis(df, m_list)
-                return df_analyzed, c_name, score, matches
-        except: continue
-    return None, code, 50, []
+def analyze_momentum(df, m_list):
+    df = df.copy()
+    # RSI (快速版)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
+    
+    # KD (短線參數 9,3)
+    low_min, high_max = df['Low'].rolling(9).min(), df['High'].rolling(9).max()
+    rsv = 100 * ((df['Close'] - low_min) / (high_max - low_min))
+    df['K'] = rsv.ewm(com=2, adjust=False).mean()
+    df['D'] = df['K'].ewm(com=2, adjust=False).mean()
+    
+    # MACD (標準)
+    exp1, exp2 = df['Close'].ewm(span=12, adjust=False).mean(), df['Close'].ewm(span=26, adjust=False).mean()
+    df['DIF'] = exp1 - exp2
+    df['DEM'] = df['DIF'].ewm(span=9, adjust=False).mean()
+    df['OSC'] = df['DIF'] - df['DEM']
+    
+    # 布林通道
+    df['MA20'] = df['Close'].rolling(20).mean()
+    df['STD'] = df['Close'].rolling(20).std()
+    df['Upper'], df['Lower'] = df['MA20'] + (df['STD'] * 2), df['MA20'] - (df['STD'] * 2)
+
+    last, prev = df.iloc[-1], df.iloc[-2]
+    matches = []
+    
+    # 判斷邏輯
+    if "KD" in m_list and last['K'] < 30 and last['K'] > prev['K']: matches.append("KD低檔轉強")
+    if "MACD" in m_list and last['OSC'] > 0 and prev['OSC'] <= 0: matches.append("MACD翻紅訊號")
+    if "RSI" in m_list and last['RSI'] > 50 and prev['RSI'] <= 50: matches.append("RSI強勢突破")
+    if "布林通道" in m_list and last['Close'] > last['Upper']: matches.append("突破布林上軌")
+    if "成交量" in m_list and last['Volume'] > df['Volume'].tail(5).mean() * 1.5: matches.append("量能異常爆發")
+    
+    score = 50 + (len(matches) * 10) if last['Close'] > prev['Close'] else 50 - (len(matches) * 10)
+    return score, matches, last
 
 # ══════════════════════════════════════════════════════════
-# 3. UI 介面
+# 3. Streamlit 主介面
 # ══════════════════════════════════════════════════════════
-st.set_page_config(page_title="台股 AI 智能監控", layout="centered")
+st.set_page_config(page_title="台股極短線 AI 監控", layout="centered")
 
-# CSS 美化：加入標籤樣式
 st.markdown("""
 <style>
     html, body, [data-testid="stAppViewContainer"] { background-color: #0a0d14 !important; color: white; }
-    .card { background:#111827; padding:20px; border-radius:15px; border-left:6px solid #38bdf8; margin-bottom:15px; }
-    .tag { background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 4px 10px; border-radius: 6px; font-size: 0.75rem; margin-right: 5px; display: inline-block; margin-top: 5px; border: 1px solid rgba(56, 189, 248, 0.3); }
-    .score-box { float:right; font-size:24px; font-weight:bold; border:2px solid; border-radius:50%; width:55px; height:55px; display:flex; align-items:center; justify-content:center; }
+    .card { background:#111827; padding:18px; border-radius:12px; border-left:6px solid #38bdf8; margin-bottom:12px; }
+    .signal-tag { background: rgba(56, 189, 248, 0.15); color: #38bdf8; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; margin-right: 5px; border: 1px solid #38bdf8; }
 </style>
 """, unsafe_allow_html=True)
 
-# 儲存清單至 URL
+# 儲存機制
 DEFAULT_STOCKS = ["2330", "2317", "00631L", "2454", "2603"]
 if "watchlist" not in st.session_state:
     params = st.query_params.get("wl", "")
@@ -114,70 +94,74 @@ if "watchlist" not in st.session_state:
 
 def sync(): st.query_params["wl"] = ",".join(st.session_state.watchlist)
 
-st.title("🛡️ 台股 AI 全能監控系統")
+st.title("⚡ 台股極短線 AI 監控系統")
 
 # 側邊欄控制
 with st.sidebar:
-    st.header("⚙️ 決策因子配置")
-    m_list = st.multiselect("勾選欲分析的指標：", 
-                          ["KD", "MACD", "RSI", "布林通道", "成交量"], 
-                          default=["KD", "MACD", "RSI", "布林通道", "成交量"])
-    warn_p = st.slider("即時漲跌預警門檻 (%)", 0.5, 5.0, 2.0)
-    st.divider()
-    if st.button("🔄 重置預設股票"):
+    st.header("⚙️ 參數設定")
+    m_list = st.multiselect("啟用決策指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
+    warn_p = st.slider("即時預警門檻 (%)", 0.5, 5.0, 1.5)
+    if st.button("🔄 恢復預設"):
         st.session_state.watchlist = DEFAULT_STOCKS
         sync(); st.rerun()
 
-# 新增功能
-with st.expander("➕ 新增關注標的", expanded=False):
+# 新增股票
+with st.expander("➕ 新增監控股票"):
     c1, c2 = st.columns([3, 1])
     with c1:
-        new_id = st.text_input("輸入代碼", placeholder="例如: 8046").strip().upper()
+        new_id = st.text_input("輸入代碼").strip().upper()
     with c2:
-        if st.button("加入監控"):
+        if st.button("確認加入"):
             if new_id and new_id not in st.session_state.watchlist:
                 st.session_state.watchlist.append(new_id)
                 sync(); st.rerun()
 
-# 渲染列表
-for idx, code in enumerate(st.session_state.watchlist):
-    df, c_name, score, matches = get_stock_full_info(code, m_list)
+st.divider()
+
+# 核心循環
+for code in st.session_state.watchlist:
+    # 嘗試抓取數據
+    data_found = False
+    for sfx in [".TW", ".TWO"]:
+        tk = yf.Ticker(f"{code}{sfx}")
+        df = tk.history(period="1mo", interval="1d") # 極短線用較短歷史提高速度
+        if not df.empty:
+            data_found = True
+            c_name = get_chinese_name(code)
+            score, matches, last = analyze_momentum(df, m_list)
+            
+            # 計算漲跌幅
+            prev_close = df.iloc[-2]['Close']
+            chg_pct = (last['Close'] - prev_close) / prev_close * 100
+            color = "#ef4444" if chg_pct > 0 else "#22c55e"
+            score_color = "#38bdf8" if score >= 60 else "#94a3b8"
+
+            # 符合指標 HTML
+            tags = "".join([f'<span class="signal-tag">{m}</span>' for m in matches])
+            alert = f"<span style='color:#facc15;'>🚨 震盪預警({warn_p}%)</span>" if abs(chg_pct) >= warn_p else ""
+
+            st.markdown(f"""
+            <div class="card" style="border-left-color: {score_color}">
+                <div style="float:right; font-size:22px; font-weight:bold; color:{score_color};">{score}分</div>
+                <div style="font-size:1.1rem; font-weight:bold;">{c_name} ({code}) {alert}</div>
+                <div style="font-size:1.6rem; font-weight:900; color:{color}; margin:8px 0;">
+                    {last['Close']:.2f} <span style="font-size:0.9rem;">({chg_pct:+.2f}%)</span>
+                </div>
+                <div style="margin-bottom:10px;">{tags if tags else '<span style="color:#475569; font-size:0.8rem;">監控中...</span>'}</div>
+                <div style="font-size:0.85rem; color:#94a3b8; background:rgba(255,255,255,0.03); padding:8px; border-radius:5px;">
+                    <b>AI 短線建議：</b> { "🔥 強勢噴發，建議續抱" if score >= 70 else "📉 走勢轉弱，建議減碼" if score <= 30 else "⚖️ 區間震盪，不宜追高" }
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            if st.button(f"🗑️ 移除 {code}", key=f"del_{code}"):
+                st.session_state.watchlist.remove(code)
+                sync(); st.rerun()
+            break
     
-    if df is not None:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        chg = (last['Close'] - prev['Close']) / prev['Close'] * 100
-        color = "#ef4444" if score >= 70 else "#22c55e" if score <= 30 else "#94a3b8"
-        
-        # 建立符合指標的標籤 HTML
-        tags_html = "".join([f'<span class="tag">{m}</span>' for m in matches])
-        if not tags_html: tags_html = '<span style="color:#64748b; font-size:0.8rem;">目前無明顯指標訊號</span>'
-        
-        # 預警文字
-        alert_msg = f"🚨 漲跌超過 {warn_p}% 預警！" if abs(chg) >= warn_p else ""
+    if not data_found:
+        st.error(f"無法載入代碼 {code}")
 
-        st.markdown(f"""
-        <div class="card" style="border-left-color: {color};">
-            <div class="score-box" style="color: {color}; border-color: {color};">{score}</div>
-            <div style="font-size: 1.2rem; font-weight: bold;">{c_name} ({code}) <span style="color:#f59e0b;">{alert_msg}</span></div>
-            <div style="font-size: 1.8rem; font-weight: 900; color: {color}; margin: 5px 0;">
-                {last['Close']:.2f} <span style="font-size: 1rem;">({chg:+.2f}%)</span>
-            </div>
-            <div style="margin-top: 5px;">
-                <b>符合指標：</b><br>{tags_html}
-            </div>
-            <div style="margin-top: 15px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px; font-size: 0.85rem; border: 1px solid rgba(255,255,255,0.1);">
-                <b style="color:{color}">💡 AI 投資建議：</b><br>
-                { "🔥 趨勢強勁，多頭指標共振，建議續抱。" if score >= 70 else "⚠️ 指標轉弱，建議適度減碼或觀望。" if score <= 30 else "⚖️ 目前盤整中，建議靜待指標突破。" }
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        if st.button(f"🗑️ 移除 {code}", key=f"del_{idx}"):
-            st.session_state.watchlist.remove(code)
-            sync(); st.rerun()
-    else:
-        st.error(f"❌ {code} 資料讀取失敗")
-
-time.sleep(60)
+# 即時掃描刷新 (極短線建議 30 秒一次)
+time.sleep(30)
 st.rerun()
