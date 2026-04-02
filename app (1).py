@@ -3,152 +3,133 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import time
-import json
 
 # ══════════════════════════════════════════════════════════
-# 1. 技術指標數學公式 (自寫版，確保不需依賴額外套件)
+# 1. 核心指標運算 (自寫版，不依賴外掛套件)
 # ══════════════════════════════════════════════════════════
-
 def compute_indicators(df):
     try:
-        # RSI (14)
+        df = df.copy()
+        # RSI
         delta = df['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-
-        # KD (9, 3, 3)
-        low_min = df['Low'].rolling(window=9).min()
-        high_max = df['High'].rolling(window=9).max()
+        df['RSI'] = 100 - (100 / (1 + (gain / loss)))
+        # KD
+        low_min, high_max = df['Low'].rolling(9).min(), df['High'].rolling(9).max()
         rsv = 100 * ((df['Close'] - low_min) / (high_max - low_min))
         df['K'] = rsv.ewm(com=2, adjust=False).mean()
         df['D'] = df['K'].ewm(com=2, adjust=False).mean()
-
-        # MACD (12, 26, 9)
+        # MACD
         exp1 = df['Close'].ewm(span=12, adjust=False).mean()
         exp2 = df['Close'].ewm(span=26, adjust=False).mean()
         df['DIF'] = exp1 - exp2
         df['DEM'] = df['DIF'].ewm(span=9, adjust=False).mean()
         df['OSC'] = df['DIF'] - df['DEM']
-
-        # 布林通道 (20, 2)
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['STD'] = df['Close'].rolling(window=20).std()
+        # 布林通道
+        df['MA20'] = df['Close'].rolling(20).mean()
+        df['STD'] = df['Close'].rolling(20).std()
         df['Upper'] = df['MA20'] + (df['STD'] * 2)
         df['Lower'] = df['MA20'] - (df['STD'] * 2)
         return df
-    except:
-        return df
+    except: return df
 
 # ══════════════════════════════════════════════════════════
-# 2. 數據抓取與中文名稱獲取
+# 2. 強化版數據抓取 (解決載入失敗問題)
 # ══════════════════════════════════════════════════════════
-
-def get_stock_info(code):
-    """獲取中文名稱與歷史數據"""
-    for suffix in [".TW", ".TWO"]:
+@st.cache_data(ttl=300)
+def fetch_stock(code):
+    """嘗試多種後綴並抓取中文名"""
+    for sfx in [".TW", ".TWO"]:
         try:
-            ticker = yf.Ticker(f"{code}{suffix}")
-            df = ticker.history(period="6mo", auto_adjust=True)
-            if not df.empty and len(df) > 30:
-                # 嘗試獲取中文名稱
-                name = ticker.info.get('longName', code)
-                # 針對台灣券商名稱編碼修正 (若為英文則保留代碼)
-                if any(ord(char) > 127 for char in name): 
-                    display_name = name
-                else:
-                    display_name = f"股票 {code}"
-                return compute_indicators(df), display_name
+            ticker = yf.Ticker(f"{code}{sfx}")
+            # 使用較短的 period 提高成功率
+            df = ticker.history(period="6mo", interval="1d", auto_adjust=True)
+            if not df.empty and len(df) > 10:
+                # 抓取中文名稱
+                raw_name = ticker.info.get('longName', code)
+                # 簡單中文判斷
+                disp_name = raw_name if any(ord(c) > 127 for c in raw_name) else f"股票 {code}"
+                return compute_indicators(df), disp_name
         except: continue
-    return None, code
+    return None, None
 
 # ══════════════════════════════════════════════════════════
-# 3. 介面與持久化邏輯
+# 3. 介面與持久化儲存
 # ══════════════════════════════════════════════════════════
-st.set_page_config(page_title="台股 AI 決策監控", layout="centered")
+st.set_page_config(page_title="台股 AI 智能監控", layout="centered")
 
-# CSS 美化
-st.markdown("""
-<style>
-    html, body, [data-testid="stAppViewContainer"] { background-color: #0a0d14 !important; color: white; }
-    .card { background:#111827; padding:20px; border-radius:15px; border-left:6px solid #38bdf8; margin-bottom:15px; }
-</style>
-""", unsafe_allow_html=True)
+# 預設五檔股票
+DEFAULT_STOCKS = "2330,2317,00631L,2454,2603"
 
-# ─── 持久化處理：從 URL 讀取清單 ───
-DEFAULT_LIST = ["2330", "2317", "00631L", "2454", "2603"]
-
+# 初始化清單
 if "watchlist" not in st.session_state:
-    # 嘗試從 URL 參數獲取 (格式: ?wl=2330,2317)
+    # 優先從網址讀取
     params = st.query_params.get("wl", "")
     if params:
         st.session_state.watchlist = params.split(",")
     else:
-        st.session_state.watchlist = DEFAULT_LIST
+        st.session_state.watchlist = DEFAULT_STOCKS.split(",")
 
-def update_url():
-    """同步清單到 URL 參數"""
+def save_list():
     st.query_params["wl"] = ",".join(st.session_state.watchlist)
 
-# ─── 側邊欄設定 ───
-with st.sidebar:
-    st.header("⚙️ 決策設定")
-    m_list = st.multiselect("啟用指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
-    warn_p = st.slider("即時漲跌預警 (%)", 0.5, 5.0, 2.0)
-    if st.button("🔄 回復預設五檔"):
-        st.session_state.watchlist = DEFAULT_LIST
-        update_url()
-        st.rerun()
+st.title("📊 台股 AI 決策監控系統")
 
-st.title("📈 台股 AI 決策監控系統")
-
-# ─── 新增股票功能 ───
+# --- 新增功能區 ---
 with st.expander("➕ 新增關注股票", expanded=True):
     c1, c2 = st.columns([3, 1])
     with c1:
-        new_id = st.text_input("輸入台股代碼", placeholder="例如: 2330").strip().upper()
+        new_id = st.text_input("輸入代碼 (例: 0050)", placeholder="請輸入 4-6 位數代碼").strip().upper()
     with c2:
         if st.button("加入監控"):
             if new_id and new_id not in st.session_state.watchlist:
                 st.session_state.watchlist.append(new_id)
-                update_url()
+                save_list()
                 st.rerun()
 
 st.divider()
 
-# ─── 渲染股票列表 ───
+# --- 側邊欄設定 ---
+with st.sidebar:
+    st.header("⚙️ 參數設定")
+    warn_p = st.slider("漲跌預警門檻 (%)", 0.5, 5.0, 2.0)
+    if st.button("🔄 重置為預設清單"):
+        st.session_state.watchlist = DEFAULT_STOCKS.split(",")
+        save_list()
+        st.rerun()
+
+# --- 顯示股票卡片 ---
 for idx, code in enumerate(st.session_state.watchlist):
-    df, c_name = get_stock_info(code)
+    df, c_name = fetch_stock(code)
     
     if df is not None:
-        # AI 分析邏輯
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        scores = []
-        if "KD" in m_list: scores.append(90 if last['K'] < 25 and last['K'] > prev['K'] else 10 if last['K'] > 75 and last['K'] < prev['K'] else 50)
-        if "RSI" in m_list: scores.append(85 if last['RSI'] < 30 else 15 if last['RSI'] > 70 else 50)
-        if "布林通道" in m_list: scores.append(90 if last['Close'] > last['Upper'] else 10 if last['Close'] < last['Lower'] else 50)
+        last, prev = df.iloc[-1], df.iloc[-2]
+        chg = (last['Close'] - prev['Close']) / prev['Close'] * 100
         
-        score = int(sum(scores)/len(scores)) if scores else 50
+        # 簡易評分邏輯
+        score = 50
+        if last['K'] < 30: score += 20
+        if last['OSC'] > 0: score += 15
+        if last['Close'] > last['MA20']: score += 15
+        
         color = "#ef4444" if score >= 70 else "#22c55e" if score <= 30 else "#94a3b8"
-        chg = ((last['Close'] - prev['Close']) / prev['Close'] * 100)
         
         st.markdown(f"""
-        <div class="card" style="border-left-color: {color};">
-            <div style="float:right; font-size:22px; font-weight:bold; color:{color}; border:2px solid {color}; border-radius:50%; width:50px; height:50px; display:flex; align-items:center; justify-content:center;">{score}</div>
-            <div style="font-size: 1.1rem; font-weight: bold;">{c_name} <span style="color:#64748b; font-size:0.8rem;">({code})</span> {"🚨" if abs(chg)>=warn_p else ""}</div>
-            <div style="font-size: 1.8rem; font-weight: 900; color: {color};">{last['Close']:.2f} <span style="font-size: 0.9rem;">({chg:+.2f}%)</span></div>
+        <div style="background:#111827; padding:20px; border-radius:15px; border-left:6px solid {color}; margin-bottom:10px; color:white;">
+            <div style="float:right; font-size:24px; font-weight:bold; color:{color}; border:2px solid {color}; border-radius:50%; width:50px; height:50px; display:flex; align-items:center; justify-content:center;">{score}</div>
+            <div style="font-size: 1.1rem; font-weight: bold;">{c_name} ({code}) {"🚨" if abs(chg)>=warn_p else ""}</div>
+            <div style="font-size: 1.8rem; font-weight: 900; color: {color};">{last['Close']:.2f} <span style="font-size:1rem;">({chg:+.2f}%)</span></div>
         </div>
         """, unsafe_allow_html=True)
         
         if st.button(f"🗑️ 移除 {code}", key=f"del_{code}"):
             st.session_state.watchlist.remove(code)
-            update_url()
+            save_list()
             st.rerun()
     else:
-        st.error(f"❌ 代碼 {code} 讀取失敗")
+        st.error(f"❌ 代碼 {code} 讀取失敗，Yahoo 伺服器目前忙碌中，請稍後幾秒重新整理。")
 
-# 自動更新
+# 每分鐘自動刷新
 time.sleep(60)
 st.rerun()
