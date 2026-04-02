@@ -5,10 +5,17 @@ import time
 import requests
 
 # ══════════════════════════════════════════════════════════
-# 1. 核心 API 抓取函式 (直接使用 REST API 確保穩定)
+# 1. 核心 API 抓取函式 (加強版：加入 Headers 與參數優化)
 # ══════════════════════════════════════════════════════════
 def fetch_finmind_api(dataset, stock_id, token, start_date=None):
     url = "https://api.finmindtrade.com/api/v4/data"
+    
+    # 這是關鍵：模擬瀏覽器標頭，避免被 API 伺服器拒絕連線
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    # 同時測試 data_id (新版規範)
     params = {
         "dataset": dataset,
         "data_id": stock_id,
@@ -18,20 +25,28 @@ def fetch_finmind_api(dataset, stock_id, token, start_date=None):
         params["start_date"] = start_date
     
     try:
-        res = requests.get(url, params=params, timeout=10)
+        res = requests.get(url, params=params, headers=headers, timeout=15)
+        if res.status_code != 200:
+            return pd.DataFrame()
+            
         data = res.json()
-        if data.get("msg") == "success":
-            return pd.DataFrame(data["data"])
+        if data.get("msg") == "success" and "data" in data:
+            df = pd.DataFrame(data["data"])
+            return df
         return pd.DataFrame()
-    except:
+    except Exception:
         return pd.DataFrame()
 
 def analyze_stock(df, m_list):
-    """計算技術指標與評分"""
+    """計算技術指標"""
     df = df.copy()
-    df = df.rename(columns={'close':'Close', 'max':'High', 'min':'Low', 'Revenue':'Volume', 'open':'Open'})
+    # 確保欄位名稱正確
+    df = df.rename(columns={'close':'Close', 'max':'High', 'min':'Low', 'Revenue':'Volume', 'open':'Open', 'date':'Date'})
     
-    # RSI
+    if len(df) < 15:
+        return 50, [], df.iloc[-1], df.iloc[-2]
+
+    # RSI (14)
     diff = df['Close'].diff()
     gain = (diff.where(diff > 0, 0)).rolling(14).mean()
     loss = (-diff.where(diff < 0, 0)).rolling(14).mean()
@@ -64,9 +79,9 @@ def analyze_stock(df, m_list):
     return int(score), matches, last, prev
 
 # ══════════════════════════════════════════════════════════
-# 2. UI 介面與授權邏輯
+# 2. UI 佈局
 # ══════════════════════════════════════════════════════════
-st.set_page_config(page_title="台股 AI 監控", layout="centered")
+st.set_page_config(page_title="台股極短線監控", layout="centered")
 
 st.markdown("""
 <style>
@@ -80,60 +95,53 @@ if "auth" not in st.session_state: st.session_state.auth = False
 if "tk" not in st.session_state: st.session_state.tk = ""
 if "watchlist" not in st.session_state: st.session_state.watchlist = ["2330", "2317", "2603", "2454"]
 
-# 登入牆
+# 登入頁面
 if not st.session_state.auth:
-    st.title("🛡️ 授權驗證")
-    t_input = st.text_input("輸入 FinMind Token", type="password")
-    if st.button("確認並開始監控", use_container_width=True):
-        # 強制驗證：試抓台積電資訊，失敗代表 Token 錯
-        check_df = fetch_finmind_api("TaiwanStockInfo", "2330", t_input)
-        if not check_df.empty:
-            st.session_state.tk = t_input
-            st.session_state.auth = True
-            st.success("✅ 驗證成功！")
-            st.rerun()
-        else:
-            st.error("❌ Token 無效或權限不足，請重新輸入。")
+    st.title("🛡️ 專業版授權驗證")
+    t_input = st.text_input("輸入您的 FinMind Token", type="password")
+    if st.button("驗證並開啟監控", use_container_width=True):
+        # 測試連線
+        with st.spinner("正在確認 API 權限..."):
+            check = fetch_finmind_api("TaiwanStockInfo", "2330", t_input)
+            if not check.empty:
+                st.session_state.tk = t_input
+                st.session_state.auth = True
+                st.success("✅ 驗證成功！")
+                st.rerun()
+            else:
+                st.error("❌ Token 驗證失敗。請確認：1. Token 完整無空格 2. 帳號額度正常。")
     st.stop()
 
 # ══════════════════════════════════════════════════════════
-# 3. 監控主畫面
+# 3. 監控面板
 # ══════════════════════════════════════════════════════════
-st.title("⚡ 台股 AI 監控中")
+st.title("⚡ AI 自動掃描中")
 
 with st.sidebar:
-    st.header("⚙️ 設定")
-    m_list = st.multiselect("分析指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
-    warn_p = st.slider("預警門檻 (%)", 0.5, 5.0, 1.5)
-    if st.button("🚪 登出/更換 Token"):
+    st.header("⚙️ 參數控制")
+    m_list = st.multiselect("啟用指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
+    warn_p = st.slider("預警比例 (%)", 0.5, 5.0, 1.5)
+    if st.button("🚪 更換 Token"):
         st.session_state.auth = False
         st.rerun()
 
-with st.expander("➕ 新增股票"):
-    c1, c2 = st.columns([3, 1])
-    with c1: new_id = st.text_input("代碼").strip()
-    with c2:
-        if st.button("加入"):
-            if new_id and new_id not in st.session_state.watchlist:
-                st.session_state.watchlist.append(new_id)
-                st.rerun()
-
-# 獲取名稱對照表
+# 股票名稱 Cache
 @st.cache_data(ttl=3600)
-def get_name_map(token):
+def get_stock_names(token):
     df = fetch_finmind_api("TaiwanStockInfo", "", token)
     if not df.empty:
         return dict(zip(df['stock_id'], df['stock_name']))
     return {}
 
-name_map = get_name_map(st.session_state.tk)
+name_map = get_stock_names(st.session_state.tk)
 
-# 渲染
+# 顯示股票卡片
 for code in st.session_state.watchlist:
-    start_dt = (pd.Timestamp.now() - pd.Timedelta(days=45)).strftime('%Y-%m-%d')
+    # 抓取最近 30 天數據 (減少封包量，提高成功率)
+    start_dt = (pd.Timestamp.now() - pd.Timedelta(days=35)).strftime('%Y-%m-%d')
     df = fetch_finmind_api("TaiwanStockDaily", code, st.session_state.tk, start_dt)
     
-    if not df.empty and len(df) >= 10:
+    if not df.empty and len(df) >= 5:
         c_name = name_map.get(code, f"個股 {code}")
         score, matches, last, prev = analyze_stock(df, m_list)
         chg = (last['Close'] - prev['Close']) / prev['Close'] * 100
@@ -149,7 +157,7 @@ for code in st.session_state.watchlist:
             <div style="font-size:1.8rem; font-weight:900; color:{color}; margin:10px 0;">
                 {last['Close']:.2f} <span style="font-size:1rem;">({chg:+.2f}%)</span>
             </div>
-            <div><b>符合指標：</b><br>{tags_html if tags_html else "掃描中..."}</div>
+            <div><b>符合指標：</b><br>{tags_html if tags_html else "無觸發"}</div>
         </div>
         """, unsafe_allow_html=True)
         
@@ -157,7 +165,7 @@ for code in st.session_state.watchlist:
             st.session_state.watchlist.remove(code)
             st.rerun()
     else:
-        st.error(f"❌ 無法獲取股票 {code} 資訊 (請檢查代碼或 Token 權限)")
+        st.warning(f"⚠️ {code}: 抓取不到今日報價，可能尚未開盤或 API 延遲。")
 
 time.sleep(60)
 st.rerun()
