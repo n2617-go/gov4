@@ -42,127 +42,113 @@ def compute_indicators(df):
         return df
 
 # ══════════════════════════════════════════════════════════
-# 2. 數據抓取與 AI 邏輯
+# 2. 數據抓取與中文名稱獲取
 # ══════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=300)
-def get_stock_data(code):
+def get_stock_info(code):
+    """獲取中文名稱與歷史數據"""
     for suffix in [".TW", ".TWO"]:
         try:
             ticker = yf.Ticker(f"{code}{suffix}")
             df = ticker.history(period="6mo", auto_adjust=True)
             if not df.empty and len(df) > 30:
-                return compute_indicators(df)
+                # 嘗試獲取中文名稱
+                name = ticker.info.get('longName', code)
+                # 針對台灣券商名稱編碼修正 (若為英文則保留代碼)
+                if any(ord(char) > 127 for char in name): 
+                    display_name = name
+                else:
+                    display_name = f"股票 {code}"
+                return compute_indicators(df), display_name
         except: continue
-    return None
-
-def analyze_stock(df, metrics):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    scores = []
-    
-    if "KD" in metrics:
-        scores.append(90 if last['K'] < 25 and last['K'] > prev['K'] else 10 if last['K'] > 75 and last['K'] < prev['K'] else 50)
-    if "RSI" in metrics:
-        scores.append(85 if last['RSI'] < 30 else 15 if last['RSI'] > 70 else 50)
-    if "MACD" in metrics:
-        scores.append(95 if last['OSC'] > 0 and prev['OSC'] <= 0 else 50)
-    if "布林通道" in metrics:
-        scores.append(90 if last['Close'] > last['Upper'] else 10 if last['Close'] < last['Lower'] else 50)
-    if "成交量" in metrics:
-        v_ma = df['Volume'].tail(5).mean()
-        scores.append(90 if last['Volume'] > v_ma * 1.5 and last['Close'] > prev['Close'] else 50)
-
-    score = int(sum(scores) / len(scores)) if scores else 50
-    color = "#ef4444" if score >= 70 else "#22c55e" if score <= 30 else "#94a3b8"
-    
-    advice = "⚖️ 指標震盪，建議靜待方向突破"
-    if score >= 70:
-        advice = "🔥 趨勢偏多建議續抱" if last['Close'] > last['MA20'] else "🚀 殺低後站回，趨勢偏多建議續抱"
-    elif score <= 30:
-        advice = "📉 趨勢轉弱建議減碼" if last['Close'] < last['MA20'] else "⚠️ 殺低後雖站回，上方有壓建議見好就收"
-        
-    return score, advice, color, last
+    return None, code
 
 # ══════════════════════════════════════════════════════════
-# 3. 介面與顯示
+# 3. 介面與持久化邏輯
 # ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="台股 AI 決策監控", layout="centered")
 
-# 設定深色背景 CSS
+# CSS 美化
 st.markdown("""
 <style>
     html, body, [data-testid="stAppViewContainer"] { background-color: #0a0d14 !important; color: white; }
-    .stButton>button { width: 100%; border-radius: 8px; }
-    .card { background:#111827; padding:20px; border-radius:15px; border-left:6px solid #38bdf8; margin-bottom:15px; position: relative; }
+    .card { background:#111827; padding:20px; border-radius:15px; border-left:6px solid #38bdf8; margin-bottom:15px; }
 </style>
 """, unsafe_allow_html=True)
 
-# 初始化 Session State (確保預設股票存在)
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = [
-        {"id": "2330", "name": "台積電"}, 
-        {"id": "2317", "name": "鴻海"},
-        {"id": "00631L", "name": "元大台灣50正2"}
-    ]
+# ─── 持久化處理：從 URL 讀取清單 ───
+DEFAULT_LIST = ["2330", "2317", "00631L", "2454", "2603"]
 
-# 側邊欄設定
+if "watchlist" not in st.session_state:
+    # 嘗試從 URL 參數獲取 (格式: ?wl=2330,2317)
+    params = st.query_params.get("wl", "")
+    if params:
+        st.session_state.watchlist = params.split(",")
+    else:
+        st.session_state.watchlist = DEFAULT_LIST
+
+def update_url():
+    """同步清單到 URL 參數"""
+    st.query_params["wl"] = ",".join(st.session_state.watchlist)
+
+# ─── 側邊欄設定 ───
 with st.sidebar:
-    st.header("⚙️ 決策與監控設定")
-    m_list = st.multiselect("啟用分析指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
+    st.header("⚙️ 決策設定")
+    m_list = st.multiselect("啟用指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
     warn_p = st.slider("即時漲跌預警 (%)", 0.5, 5.0, 2.0)
-    st.divider()
-    if st.button("🔄 重置為預設清單"):
-        st.session_state.watchlist = [{"id": "2330", "name": "台積電"}, {"id": "2317", "name": "鴻海"}]
+    if st.button("🔄 回復預設五檔"):
+        st.session_state.watchlist = DEFAULT_LIST
+        update_url()
         st.rerun()
 
 st.title("📈 台股 AI 決策監控系統")
 
-# --- 補回：新增關注股票的功能區域 ---
+# ─── 新增股票功能 ───
 with st.expander("➕ 新增關注股票", expanded=True):
     c1, c2 = st.columns([3, 1])
     with c1:
-        new_id = st.text_input("輸入股票代碼 (例: 2454)", key="add_input").strip().upper()
+        new_id = st.text_input("輸入台股代碼", placeholder="例如: 2330").strip().upper()
     with c2:
         if st.button("加入監控"):
-            if new_id and not any(s['id'] == new_id for s in st.session_state.watchlist):
-                st.session_state.watchlist.append({"id": new_id, "name": new_id})
+            if new_id and new_id not in st.session_state.watchlist:
+                st.session_state.watchlist.append(new_id)
+                update_url()
                 st.rerun()
 
 st.divider()
 
-# 顯示股票卡片
-for idx, s in enumerate(st.session_state.watchlist):
-    df = get_stock_data(s['id'])
+# ─── 渲染股票列表 ───
+for idx, code in enumerate(st.session_state.watchlist):
+    df, c_name = get_stock_info(code)
+    
     if df is not None:
-        score, advice, color, last = analyze_stock(df, m_list)
-        chg = ((last['Close'] - df['Close'].iloc[-2]) / df['Close'].iloc[-2] * 100)
+        # AI 分析邏輯
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        scores = []
+        if "KD" in m_list: scores.append(90 if last['K'] < 25 and last['K'] > prev['K'] else 10 if last['K'] > 75 and last['K'] < prev['K'] else 50)
+        if "RSI" in m_list: scores.append(85 if last['RSI'] < 30 else 15 if last['RSI'] > 70 else 50)
+        if "布林通道" in m_list: scores.append(90 if last['Close'] > last['Upper'] else 10 if last['Close'] < last['Lower'] else 50)
         
-        # 繪製美化卡片
+        score = int(sum(scores)/len(scores)) if scores else 50
+        color = "#ef4444" if score >= 70 else "#22c55e" if score <= 30 else "#94a3b8"
+        chg = ((last['Close'] - prev['Close']) / prev['Close'] * 100)
+        
         st.markdown(f"""
         <div class="card" style="border-left-color: {color};">
-            <div style="float:right; font-size:24px; font-weight:bold; color:{color}; border:2px solid {color}; border-radius:50%; width:52px; height:52px; display:flex; align-items:center; justify-content:center;">
-                {score}
-            </div>
-            <div style="font-size: 1.1rem; font-weight: bold; margin-bottom: 5px;">
-                {s['name']} <span style="color:#64748b; font-size:0.8rem;">({s['id']})</span> {"🚨" if abs(chg)>=warn_p else ""}
-            </div>
-            <div style="font-size: 1.8rem; font-weight: 900; color: {color};">
-                {last['Close']:.2f} <span style="font-size: 0.9rem;">({chg:+.2f}%)</span>
-            </div>
-            <div style="margin-top: 12px; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 8px; font-size: 0.9rem;">
-                <b style="color: {color}">💡 AI 決策建議：</b><br>{advice}
-            </div>
+            <div style="float:right; font-size:22px; font-weight:bold; color:{color}; border:2px solid {color}; border-radius:50%; width:50px; height:50px; display:flex; align-items:center; justify-content:center;">{score}</div>
+            <div style="font-size: 1.1rem; font-weight: bold;">{c_name} <span style="color:#64748b; font-size:0.8rem;">({code})</span> {"🚨" if abs(chg)>=warn_p else ""}</div>
+            <div style="font-size: 1.8rem; font-weight: 900; color: {color};">{last['Close']:.2f} <span style="font-size: 0.9rem;">({chg:+.2f}%)</span></div>
         </div>
         """, unsafe_allow_html=True)
         
-        # 移除按鈕 (放在卡片下方)
-        if st.button(f"🗑️ 移除 {s['id']}", key=f"del_{idx}"):
-            st.session_state.watchlist.pop(idx)
+        if st.button(f"🗑️ 移除 {code}", key=f"del_{code}"):
+            st.session_state.watchlist.remove(code)
+            update_url()
             st.rerun()
     else:
-        st.error(f"❌ 無法讀取 {s['id']} 的資料，請確認代碼是否正確。")
+        st.error(f"❌ 代碼 {code} 讀取失敗")
 
-# 自動每分鐘更新
+# 自動更新
 time.sleep(60)
 st.rerun()
