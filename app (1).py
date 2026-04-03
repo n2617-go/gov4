@@ -3,63 +3,61 @@ import pandas as pd
 import yfinance as yf
 import json
 import time
-from streamlit_cookies_controller import CookieController
+from streamlit_cookies_manager import EncryptedCookieManager
 
 # ══════════════════════════════════════════════════════════
 # 1. 系統初始化
 # ══════════════════════════════════════════════════════════
 st.set_page_config(page_title="AI 股市監控旗艦版", layout="centered")
 
-controller = CookieController()
+# 加密金鑰從 Streamlit Cloud Secrets 讀取
+# 請在 Streamlit Cloud → Settings → Secrets 加入：
+# COOKIE_PASSWORD = "你自己設定的任意字串"
+cookies = EncryptedCookieManager(
+    prefix="stockapp_",
+    password=st.secrets["COOKIE_PASSWORD"]
+)
+
+# 等待 cookie 就緒，未就緒時自動暫停
+if not cookies.ready():
+    st.stop()
 
 # ──────────────────────────────────────────────────────────
-# 【修正一】Cookie 讀取需等待一個 rerun 才能正確取值
-# 用 _loaded 旗標確保只初始化一次，避免每次 rerun 都重置
+# Cookie 讀取（此時已確保就緒）
 # ──────────────────────────────────────────────────────────
-if "_loaded" not in st.session_state:
-    st.session_state._loaded = False
-    st.rerun()
+DEFAULT_WATCHLIST = [
+    {"code": "2330", "name": "台積電"},
+    {"code": "2317", "name": "鴻海"},
+    {"code": "2603", "name": "長榮"},
+    {"code": "2454", "name": "聯發科"},
+]
 
-if not st.session_state._loaded:
-    cookie_token     = controller.get('finmind_token')
-    cookie_watchlist = controller.get('user_watchlist')
+if "tk" not in st.session_state:
+    saved_token = cookies.get("finmind_token", "")
+    if saved_token:
+        st.session_state.tk = saved_token
 
-    if "tk" not in st.session_state and cookie_token:
-        st.session_state.tk = cookie_token
-
-    # 【修正二】watchlist 改存 list of dict，格式：
-    # [{"code": "2330", "name": "台積電"}, ...]
-    # 名稱一併存入 cookie，重開頁面也不需重新抓取
-    DEFAULT_WATCHLIST = [
-        {"code": "2330", "name": "台積電"},
-        {"code": "2317", "name": "鴻海"},
-        {"code": "2603", "name": "長榮"},
-        {"code": "2454", "name": "聯發科"},
-    ]
-
-    if "watchlist" not in st.session_state:
-        if cookie_watchlist:
-            try:
-                loaded = json.loads(cookie_watchlist)
-                # 相容舊格式（純字串列表）自動升級
-                if loaded and isinstance(loaded[0], str):
-                    loaded = [{"code": c, "name": c} for c in loaded]
-                st.session_state.watchlist = loaded
-            except:
-                st.session_state.watchlist = DEFAULT_WATCHLIST
-        else:
+if "watchlist" not in st.session_state:
+    saved_wl = cookies.get("user_watchlist", "")
+    if saved_wl:
+        try:
+            loaded = json.loads(saved_wl)
+            # 相容舊格式（純字串列表）自動升級
+            if loaded and isinstance(loaded[0], str):
+                loaded = [{"code": c, "name": c} for c in loaded]
+            st.session_state.watchlist = loaded
+        except:
             st.session_state.watchlist = DEFAULT_WATCHLIST
-
-    st.session_state._loaded = True
+    else:
+        st.session_state.watchlist = DEFAULT_WATCHLIST
 
 
 def save_watchlist():
-    """新增/刪除後呼叫，立即寫回 cookie（30天）"""
-    controller.set(
-        'user_watchlist',
-        json.dumps(st.session_state.watchlist, ensure_ascii=False),
-        max_age=2592000
+    """新增／刪除後呼叫，立即寫回瀏覽器 cookie（30天）"""
+    cookies["user_watchlist"] = json.dumps(
+        st.session_state.watchlist, ensure_ascii=False
     )
+    cookies.save()
 
 
 # ══════════════════════════════════════════════════════════
@@ -77,15 +75,13 @@ def get_stock_data(code):
             df = df.reset_index()
             df.columns = [c.lower() for c in df.columns]
             df = df.rename(columns={'high': 'max', 'low': 'min'})
-
             try:
                 info = ticker.info
-                # shortName 通常含中文（如「台積電」），優先使用
+                # shortName 通常是中文（如「台積電」），優先使用
                 raw_name = info.get('shortName') or info.get('longName') or ""
                 name = raw_name.strip() if raw_name.strip() else f"個股{code}"
             except:
                 name = f"個股{code}"
-
             return df, name
         except:
             continue
@@ -123,11 +119,11 @@ def analyze_stock(df, m_list, warn_p):
 
     last, prev = df.iloc[-1], df.iloc[-2]
 
-    if "KD"     in m_list and last['K'] < 35 and last['K'] > prev['K']:      matches.append("🔥 KD轉強")
-    if "MACD"   in m_list and last['OSC'] > 0 and prev['OSC'] <= 0:          matches.append("🚀 MACD翻紅")
-    if "RSI"    in m_list and last['RSI'] > 50 and prev['RSI'] <= 50:        matches.append("📈 RSI強勢")
-    if "布林通道" in m_list and last['close'] > last['Up']:                   matches.append("🌌 突破布林")
-    if "成交量"  in m_list and last['volume'] > last['v_ma5'] * 1.5:         matches.append("📊 量能爆發")
+    if "KD"     in m_list and last['K'] < 35 and last['K'] > prev['K']:    matches.append("🔥 KD轉強")
+    if "MACD"   in m_list and last['OSC'] > 0 and prev['OSC'] <= 0:        matches.append("🚀 MACD翻紅")
+    if "RSI"    in m_list and last['RSI'] > 50 and prev['RSI'] <= 50:      matches.append("📈 RSI強勢")
+    if "布林通道" in m_list and last['close'] > last['Up']:                 matches.append("🌌 突破布林")
+    if "成交量"  in m_list and last['volume'] > last['v_ma5'] * 1.5:       matches.append("📊 量能爆發")
 
     chg = (last['close'] - prev['close']) / prev['close'] * 100
     is_warning = abs(chg) >= warn_p
@@ -154,7 +150,8 @@ if not st.session_state.get("tk"):
     if st.button("驗證並登入"):
         if tk_input:
             st.session_state.tk = tk_input
-            controller.set('finmind_token', tk_input, max_age=2592000)
+            cookies["finmind_token"] = tk_input
+            cookies.save()
             st.success("登入成功！正在載入數據...")
             time.sleep(0.5)
             st.rerun()
@@ -234,19 +231,20 @@ with st.sidebar:
                 st.error(f"找不到代碼 {code_clean}，請確認代碼是否正確")
             else:
                 st.session_state.watchlist.append({"code": code_clean, "name": tmp_name})
-                save_watchlist()  # 立即寫入 cookie
+                save_watchlist()
                 st.rerun()
 
     st.divider()
     if st.button("🚪 登出系統"):
-        controller.remove('finmind_token')
+        cookies["finmind_token"] = ""
+        cookies.save()
         st.session_state.tk = None
         st.rerun()
 
 # ── 主面板 ──
 st.title("⚡ AI 自動監控面板")
 
-need_save = False  # 用於批次更新名稱後統一儲存
+need_save = False
 
 for item in list(st.session_state.watchlist):
     code   = item["code"]
@@ -254,7 +252,7 @@ for item in list(st.session_state.watchlist):
 
     df, fetched_name = get_stock_data(code)
 
-    # 若儲存的名稱還是佔位符，用最新抓到的更新並存回 cookie
+    # 若名稱還是佔位符，更新並標記需要儲存
     if c_name == code or c_name.startswith("個股") or c_name.startswith("代碼"):
         item["name"] = fetched_name
         c_name = fetched_name
@@ -299,7 +297,7 @@ for item in list(st.session_state.watchlist):
 
     if st.button(f"🗑️ 移除 {code}", key=f"del_{code}"):
         st.session_state.watchlist = [i for i in st.session_state.watchlist if i["code"] != code]
-        save_watchlist()  # 立即寫入 cookie
+        save_watchlist()
         st.rerun()
 
 # 若有名稱被更新，統一儲存一次
