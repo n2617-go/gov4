@@ -30,28 +30,41 @@ if "tk" not in st.session_state and cookie_token:
 # ══════════════════════════════════════════════════════════
 # 2. 核心分析引擎
 # ══════════════════════════════════════════════════════════
+
+# 【修正二 & 三】先試 .TW 再試 .TWO，且 info 抓取獨立 try/except
 def get_stock_data(code):
-    yf_code = code + ".TW" if len(code) <= 4 else code + ".TWO"
-    try:
-        ticker = yf.Ticker(yf_code)
-        df = ticker.history(period="6mo")
-        if not df.empty:
-            info = ticker.info
-            name = info.get('longName') or info.get('shortName') or f"個股 {code}"
+    for suffix in [".TW", ".TWO"]:
+        yf_code = code + suffix
+        try:
+            ticker = yf.Ticker(yf_code)
+            df = ticker.history(period="6mo")
+            if df.empty:
+                continue
             df = df.reset_index()
             df.columns = [c.lower() for c in df.columns]
-            return df.rename(columns={'high':'max', 'low':'min'}), name
-    except: pass
+            df = df.rename(columns={'high': 'max', 'low': 'min'})
+
+            # 獨立抓 name，避免 info timeout 讓整個函數失敗
+            try:
+                info = ticker.info
+                name = info.get('longName') or info.get('shortName') or f"個股 {code}"
+            except:
+                name = f"個股 {code}"
+
+            return df, name
+        except:
+            continue
     return pd.DataFrame(), f"代碼 {code}"
+
 
 def analyze_stock(df, m_list, warn_p):
     if df.empty or len(df) < 20:
         return 50, [], "數據不足", "累積數據中...", "觀望", False
-    
+
     # 確保數值正確
     df['close'] = pd.to_numeric(df['close'], errors='coerce')
     df = df.dropna(subset=['close']).reset_index(drop=True)
-    
+
     matches = []
     # RSI (14)
     diff = df['close'].diff()
@@ -71,7 +84,7 @@ def analyze_stock(df, m_list, warn_p):
     df['v_ma5'] = df['volume'].rolling(5).mean()
 
     last, prev = df.iloc[-1], df.iloc[-2]
-    
+
     if "KD" in m_list and last['K'] < 35 and last['K'] > prev['K']: matches.append("🔥 KD轉強")
     if "MACD" in m_list and last['OSC'] > 0 and prev['OSC'] <= 0: matches.append("🚀 MACD翻紅")
     if "RSI" in m_list and last['RSI'] > 50 and prev['RSI'] <= 50: matches.append("📈 RSI強勢")
@@ -80,7 +93,7 @@ def analyze_stock(df, m_list, warn_p):
 
     chg = (last['close'] - prev['close']) / prev['close'] * 100
     is_warning = abs(chg) >= warn_p
-    
+
     status, strategy = "中性觀察", "觀望"
     reason = "目前多空訊號不明，建議靜待突破。"
     if len(matches) >= 3 and chg > 0:
@@ -93,6 +106,7 @@ def analyze_stock(df, m_list, warn_p):
     score = int(50 + (len(matches) * 10))
     return score, matches, status, reason, strategy, is_warning
 
+
 # ══════════════════════════════════════════════════════════
 # 3. 登入 UI 阻擋 (Token 功能補回)
 # ══════════════════════════════════════════════════════════
@@ -104,40 +118,79 @@ if not st.session_state.get("tk"):
     if st.button("驗證並登入"):
         if tk_input:
             st.session_state.tk = tk_input
-            controller.set('finmind_token', tk_input, max_age=2592000) # 記住 30 天
+            controller.set('finmind_token', tk_input, max_age=2592000)
             st.success("登入成功！正在載入數據...")
             time.sleep(0.5)
             st.rerun()
         else:
             st.error("請輸入正確的 Token")
-    st.stop() # 未登入則停止執行後續程式
+    st.stop()
 
 # ══════════════════════════════════════════════════════════
-# 4. 主 UI 介面 (側邊欄登出與設定)
+# 4. 主 UI 介面
 # ══════════════════════════════════════════════════════════
+
+# 【修正一】CSS 獨立用普通字串 inject，不混入 f-string
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background-color: #0a0d14; color: white; }
-    .card { background:#111827; padding:20px; border-radius:12px; border-left:6px solid #38bdf8; margin-bottom:15px; border:1px solid #1e2533; position: relative; }
-    .dec-box { background:#0f172a; padding:12px; border-radius:8px; margin:10px 0; border:1px solid #1e293b; }
-    .tag { background:#1e293b; color:#38bdf8; padding:3px 8px; border-radius:4px; font-size:0.75rem; margin-right:5px; border:1px solid #334155; }
-    .warn-label { background:#facc15; color:#000; padding:2px 8px; border-radius:4px; font-size:0.7rem; font-weight:bold; position:absolute; top:10px; right:20px; }
+    .card {
+        background: #111827;
+        padding: 20px;
+        border-radius: 12px;
+        border-left: 6px solid #38bdf8;
+        margin-bottom: 15px;
+        border: 1px solid #1e2533;
+        position: relative;
+    }
+    .dec-box {
+        background: #0f172a;
+        padding: 12px;
+        border-radius: 8px;
+        margin: 10px 0;
+        border: 1px solid #1e293b;
+    }
+    .tag {
+        background: #1e293b;
+        color: #38bdf8;
+        padding: 3px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        margin-right: 5px;
+        border: 1px solid #334155;
+    }
+    .warn-label {
+        background: #facc15;
+        color: #000;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.7rem;
+        font-weight: bold;
+        position: absolute;
+        top: 10px;
+        right: 20px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("⚙️ 控制中心")
-    m_list = st.multiselect("啟用指標", ["KD", "MACD", "RSI", "布林通道", "成交量"], default=["KD", "MACD", "RSI", "布林通道", "成交量"])
+    m_list = st.multiselect(
+        "啟用指標",
+        ["KD", "MACD", "RSI", "布林通道", "成交量"],
+        default=["KD", "MACD", "RSI", "布林通道", "成交量"]
+    )
     warn_p = st.slider("預警門檻 (%)", 0.5, 10.0, 1.5)
-    
+
     st.divider()
     new_code = st.text_input("➕ 新增代碼")
     if st.button("確認新增"):
-        if new_code and new_code not in st.session_state.watchlist:
-            st.session_state.watchlist.append(new_code.strip())
+        code_clean = new_code.strip().upper()
+        if code_clean and code_clean not in st.session_state.watchlist:
+            st.session_state.watchlist.append(code_clean)
             controller.set('user_watchlist', json.dumps(st.session_state.watchlist), max_age=2592000)
             st.rerun()
-    
+
     st.divider()
     if st.button("🚪 登出系統"):
         controller.remove('finmind_token')
@@ -157,27 +210,35 @@ for code in list(st.session_state.watchlist):
     prev_p = df.iloc[-2]['close']
     chg = (last_p - prev_p) / prev_p * 100
     color = "#ef4444" if chg >= 0 else "#22c55e"
-    
-    html_card = f'''
-    <div class="card" style="border-left-color: {color}">
-        {f'<div class="warn-label">⚠️ 波動達 {warn_p}%</div>' if is_warn else ''}
-        <div style="float:right; text-align:right;">
-            <div style="color:{color}; font-size:1.5rem; font-weight:bold;">{score}</div>
-            <div style="color:#38bdf8; font-size:0.85rem; font-weight:bold;">{strategy}</div>
-        </div>
-        <div style="font-size:1.1rem; font-weight:bold;">{c_name} ({code})</div>
-        <div style="font-size:2rem; font-weight:900; color:{color}; margin:10px 0;">
-            {last_p:.2f} <small style="font-size:1rem;">({chg:+.2f}%)</small>
-        </div>
-        <div class="dec-box">
-            <div style="color:#94a3b8; font-size:0.75rem; font-weight:bold;">AI 決策：{status}</div>
-            <div style="color:#f1f5f9; font-size:0.85rem; line-height:1.5;">{reason}</div>
-        </div>
-        <div>{" ".join([f'<span class="tag">{m}</span>' for m in matches]) if matches else '<span style="color:#475569; font-size:0.7rem;">掃描訊號中...</span>'}</div>
-    </div>
-    '''
+
+    warn_html = f'<div class="warn-label">⚠️ 波動達 {warn_p}%</div>' if is_warn else ''
+    tags_html = (
+        " ".join([f'<span class="tag">{m}</span>' for m in matches])
+        if matches else '<span style="color:#475569; font-size:0.7rem;">掃描訊號中...</span>'
+    )
+
+    # 【修正一】行內 style 的數值用變數替換，避免 CSS 括號衝突
+    html_card = (
+        '<div class="card" style="border-left-color: ' + color + '">'
+        + warn_html
+        + '<div style="float:right; text-align:right;">'
+        + '<div style="color:' + color + '; font-size:1.5rem; font-weight:bold;">' + str(score) + '</div>'
+        + '<div style="color:#38bdf8; font-size:0.85rem; font-weight:bold;">' + strategy + '</div>'
+        + '</div>'
+        + '<div style="font-size:1.1rem; font-weight:bold;">' + c_name + ' (' + code + ')</div>'
+        + '<div style="font-size:2rem; font-weight:900; color:' + color + '; margin:10px 0;">'
+        + f'{last_p:.2f} <small style="font-size:1rem;">({chg:+.2f}%)</small>'
+        + '</div>'
+        + '<div class="dec-box">'
+        + '<div style="color:#94a3b8; font-size:0.75rem; font-weight:bold;">AI 決策：' + status + '</div>'
+        + '<div style="color:#f1f5f9; font-size:0.85rem; line-height:1.5;">' + reason + '</div>'
+        + '</div>'
+        + '<div>' + tags_html + '</div>'
+        + '</div>'
+    )
+
     st.markdown(html_card, unsafe_allow_html=True)
-    
+
     if st.button(f"🗑️ 移除 {code}", key=f"del_{code}"):
         st.session_state.watchlist.remove(code)
         controller.set('user_watchlist', json.dumps(st.session_state.watchlist), max_age=2592000)
